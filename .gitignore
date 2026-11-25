@@ -1,0 +1,11 @@
+/target/
+/worlds/
+*.stackworld.db
+*.stackworld.db-wal
+*.stackworld.db-shm
+_library.db
+_library.db-wal
+_library.db-shm
+.env
+.DS_Store
+Thumbs.db

@@ -1,0 +1,696 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>StackCity RT（像素疊界）— Sprite-Stacking 微縮城市導演沙盒</title>
+  <link rel="stylesheet" href="/css/style.css" />
+</head>
+<body>
+  <div id="app" class="app-shell">
+    <!-- 頂部全域導覽與時光天候列 -->
+    <header class="topbar">
+      <div class="topbar-group">
+        <div class="brand">
+          <span class="brand-logo">◆</span>
+          <div>
+            <strong>StackCity RT</strong>
+            <small>像素疊界</small>
+          </div>
+        </div>
+        <select id="worldSelect" class="ctrl-select" title="切換本地世界"></select>
+        <button id="btnRenameWorld" class="btn btn-icon" title="重新命名目前世界">✏️</button>
+        <button id="btnNewWorld" class="btn btn-sub" title="建立新戶外或室內場景">＋ 新建世界</button>
+        <button id="btnMapManage" class="btn btn-sub" title="擴大或調整目前場景地圖尺寸">🗺️ 擴展場景</button>
+        <button id="btnModeToggle" class="btn btn-accent-soft" title="切換編輯模式與好友參觀模式">✏️ 編輯模式</button>
+      </div>
+
+      <div class="topbar-group time-weather-bar">
+        <button id="btnPlayPause" class="btn btn-icon" title="暫停／播放模擬">▶️</button>
+        <select id="timeSpeedSelect" class="ctrl-select ctrl-compact" title="模擬時間流速">
+          <option value="0">時鐘暫停</option>
+          <option value="1" selected>1x 時光</option>
+          <option value="4">4x 加速</option>
+          <option value="12">12x 快轉</option>
+        </select>
+        <div class="time-slider-wrap">
+          <span id="timeLabel" class="mono-badge">10:30</span>
+          <input id="timeSlider" type="range" min="0" max="23.95" step="0.05" value="10.5" title="拖曳調整 24 小時日夜光影" />
+        </div>
+        <div class="seg-group" id="weatherGroup" title="切換天氣特效">
+          <button class="seg-btn active" data-weather="clear">☀️ 晴</button>
+          <button class="seg-btn" data-weather="rain">🌧️ 雨</button>
+          <button class="seg-btn" data-weather="snow">❄️ 雪</button>
+        </div>
+      </div>
+
+      <div class="topbar-group">
+        <button id="btnPlayerAvatar" class="btn btn-gold" title="選定並自訂你的 3D 玩家角色外觀與名字">🧑 玩家角色</button>
+        <button id="btnCityWalk" class="btn btn-citywalk" title="以你的玩家角色進入第三人稱街道漫步">🚶 街道漫步</button>
+        <button id="btnBgm" class="btn btn-sub" title="選擇多風格背景音樂或上傳自訂音樂">🎵 音樂</button>
+        <button id="btnMute" class="btn btn-icon" title="開啟／靜音全部聲音">🔊</button>
+        <button id="btnResetProgress" class="btn btn-sub" title="清除遊玩進度重玩，或回復世界初始狀態">🔄 重置</button>
+        <button id="btnSnapshot" class="btn btn-sub" title="建立或還原 SQLite 世界快照">📸 快照</button>
+        <button id="btnShareWorld" class="btn btn-primary" title="匯出或匯入好友的 .stackworld.db 世界檔">🤝 分享</button>
+        <div class="seg-group" title="收合或展開左右操作面板">
+          <button id="btnToggleLeft" class="seg-btn active" title="收合／展開左側造物面板">◧ 左欄</button>
+          <button id="btnToggleRight" class="seg-btn active" title="收合／展開右側屬性導演面板">◨ 右欄</button>
+        </div>
+        <select id="langSelect" class="ctrl-select ctrl-compact" title="切換介面語言 / Language">
+          <option value="zh-Hant">🌐 繁體中文</option>
+          <option value="en">🌐 English</option>
+          <option value="ja">🌐 日本語</option>
+        </select>
+        <button id="btnFullscreen" class="btn btn-icon" title="切換全螢幕沉浸體驗">⛶</button>
+      </div>
+    </header>
+
+    <!-- 主工作區：左造物工具面板 + 中央 3D 微縮畫布 + 右屬性導演面板 -->
+    <main class="workspace">
+      <!-- 左側：工具與資產庫 -->
+      <aside id="leftSidebar" class="sidebar sidebar-left">
+        <section class="panel-sec">
+          <div class="sec-title-row">
+            <span>操作工具</span>
+            <button id="btnCollapseLeftInner" class="btn-mini" title="收合左側面板">◀ 收合</button>
+          </div>
+          <div id="toolPalette" class="tool-grid">
+            <button class="tool-btn active" data-tool="select" title="點選、拖曳移動或調整物件">🖱️ 選取</button>
+            <button class="tool-btn" data-tool="pan" title="左鍵拖曳平移場景（中鍵或 Space+左鍵亦可）">✋ 拖曳</button>
+            <button class="tool-btn" data-tool="place" title="點擊地圖投放選定精靈物件">📦 投放</button>
+            <button class="tool-btn" data-tool="brush" title="依生態規則在圓形範圍隨機撒出物件">🌿 生態筆刷</button>
+            <button class="tool-btn" data-tool="terrain" title="塑形高低台地、草沙雪水體與室內牆地">⛰️ 地形</button>
+            <button class="tool-btn" data-tool="road" title="智慧鋪設柏油路、石道與橋樑">🛣️ 鋪路</button>
+            <button class="tool-btn" data-tool="path" title="在地圖點擊繪製移動巡航路徑">〰️ 畫路徑</button>
+            <button class="tool-btn" data-tool="zone" title="建立動物/路人自由漫遊圍欄">⭕ 漫遊區</button>
+            <button class="tool-btn danger" data-tool="erase" title="點擊刪除物件或移除道路">🗑️ 刪除</button>
+          </div>
+
+          <!-- 工具子選項（依目前工具動態顯示） -->
+          <div id="subToolOptions" class="sub-options"></div>
+        </section>
+
+        <section class="panel-sec panel-grow">
+          <div class="sec-title-row">
+            <span>Sprite-Stack 資產庫</span>
+            <button id="btnOpenStudio" class="btn btn-studio">✨ 造物工坊</button>
+          </div>
+          <div id="assetCategoryTabs" class="cat-tabs">
+            <button class="cat-tab active" data-cat="all">全部</button>
+            <button class="cat-tab" data-cat="building">建築</button>
+            <button class="cat-tab" data-cat="character">人物</button>
+            <button class="cat-tab" data-cat="animal">動物</button>
+            <button class="cat-tab" data-cat="plant">植物</button>
+            <button class="cat-tab" data-cat="vehicle">載具</button>
+            <button class="cat-tab" data-cat="prop">道具/家具</button>
+          </div>
+          <div id="assetRemoveBar" class="asset-remove-bar hidden">
+            <span id="assetRemoveMsg">確定要從本世界移除此物件嗎？</span>
+            <div class="row-gap">
+              <button id="btnCancelRemoveWorldAsset" class="btn btn-sub" type="button">取消</button>
+              <button id="btnConfirmRemoveWorldAsset" class="btn btn-danger" type="button">🔥 確定移除</button>
+            </div>
+          </div>
+          <div id="assetGrid" class="asset-grid"></div>
+        </section>
+      </aside>
+
+      <!-- 中央：WebGL2 3D 微縮畫布與疊層 HUD -->
+      <section class="viewport-wrap">
+        <canvas id="glCanvas"></canvas>
+        <canvas id="overlayCanvas"></canvas>
+
+        <!-- 面板收合後的畫布邊緣快速展開鈕 -->
+        <button id="floatExpandLeft" class="float-expand left hidden" title="展開左側造物工具">▶ 造物工具</button>
+        <button id="floatExpandRight" class="float-expand right hidden" title="展開右側屬性導演">屬性／事件 ◀</button>
+
+        <!-- 左上角輕量狀態與相機控制列 -->
+        <div class="hud-top-left">
+          <div id="worldBadge" class="hud-pill">載入中...</div>
+          <button id="btnResetCam" class="hud-pill hud-btn" title="重設視角 (R)">🧭 重設視角</button>
+          <button id="btnRotateLeft" class="hud-pill hud-btn" title="向左旋轉 45° (Q)">↺</button>
+          <button id="btnRotateRight" class="hud-pill hud-btn" title="向右旋轉 45° (E)">↻</button>
+        </div>
+
+        <!-- 街道漫步模式專屬操作提示 -->
+        <div id="cityWalkBanner" class="citywalk-banner hidden">
+          <span>🚶 <strong>CityRT 街道漫步</strong>｜WASD 移動（A左/D右）、按住拖曳轉向、點擊或按 F 與身旁物件互動、空白鍵跳躍</span>
+          <button id="btnWalkChangeAvatar" class="btn btn-gold" style="padding:3px 9px;">🧑 換造型</button>
+          <button id="btnExitWalk" class="btn btn-sub">返回上帝視角</button>
+        </div>
+
+        <!-- 畫布底部快捷操作提示 -->
+        <div id="hudHint" class="hud-bottom-hint">
+          WASD／方向鍵：操控玩家移動・空白鍵：跳躍・F 或雙擊物件：任務互動・右鍵旋轉・中鍵／✋拖曳：移動畫面
+        </div>
+
+        <!-- 任務目標進度追蹤浮動 HUD -->
+        <div id="questHud" class="quest-hud hidden"></div>
+
+        <!-- 提示訊息 Toast -->
+        <div id="toastStack" class="toast-stack"></div>
+      </section>
+
+      <!-- 右側：屬性編輯器 ＋ 活體事件導演面板 ＋ 任務目標規畫 -->
+      <aside id="rightSidebar" class="sidebar sidebar-right">
+        <div class="right-tabs">
+          <button class="right-tab active" data-rtab="inspector">🎛️ 屬性</button>
+          <button class="right-tab" data-rtab="motion">〰️ 路徑</button>
+          <button class="right-tab" data-rtab="events">🎬 事件</button>
+          <button class="right-tab" data-rtab="quest">🏆 任務</button>
+        </div>
+        <div id="rightPanelBody" class="right-body"></div>
+      </aside>
+    </main>
+  </div>
+
+  <!-- Sprite-Stacking 造物工坊 Modal -->
+  <div id="studioModal" class="modal-backdrop hidden">
+    <div class="modal-card modal-studio">
+      <div class="modal-header">
+        <div>
+          <h2>✨ Sprite-Stacking 造物工坊</h2>
+          <p>純 Rust 即時體素烘焙：支援 68 種建築/角色/家具/機械原型、3D 積木藍圖、四視圖雕刻與套件匯入</p>
+        </div>
+        <button class="modal-close" data-close-modal="studioModal">✕</button>
+      </div>
+      <div class="studio-body">
+        <div class="studio-left">
+          <div class="studio-tabs">
+            <button class="st-tab active" data-st="prompt">🪄 快速造物</button>
+            <button class="st-tab" data-st="blueprint">🧱 3D 積木藍圖</button>
+            <button class="st-tab" data-st="import">📚 資產管理／雕刻／匯入</button>
+            <button class="st-tab" data-st="ai">🤖 AI 藍圖</button>
+          </div>
+
+          <div id="stPanePrompt" class="st-pane active">
+            <label class="field-label">輸入繁體中文／英文物件描述（支援建築、人物、家具、機械與雪景/夜光修飾）</label>
+            <div class="row-gap">
+              <input id="stPromptInput" class="ctrl-input" placeholder="例如：黃金王座、自動機械手臂、粉色沙發、雪中的城堡..." />
+              <button id="btnStGenerate" class="btn btn-primary">⚡ 生成</button>
+            </div>
+            <div class="row-gap">
+              <label class="inline-field">切片層數
+                <input id="stSliceSlider" type="range" min="20" max="60" value="44" />
+                <span id="stSliceVal" class="mono-badge">44</span>
+              </label>
+            </div>
+            <div class="sec-title" style="margin-top:8px;">6 大類 68 種內建精選原型（點擊立即生成）</div>
+            <div id="stPresetCatalog" class="preset-chips"></div>
+          </div>
+
+          <div id="stPaneBlueprint" class="st-pane">
+            <div id="bpEditBanner" class="bp-edit-banner hidden">
+              <div>
+                <strong id="bpEditBannerTitle">✏️ 正在編輯既有物件</strong>
+                <small id="bpEditBannerScope"></small>
+              </div>
+              <div class="row-gap">
+                <button id="btnBpSaveOverwrite" class="btn btn-gold">💾 覆寫儲存原物件</button>
+                <button id="btnBpSaveAsNew" class="btn btn-primary">✨ 另存新物件</button>
+                <button id="btnBpCancelEdit" class="btn btn-sub">✕ 結束編輯</button>
+              </div>
+            </div>
+
+            <div class="bp-meta-bar">
+              <label class="field-label" style="flex:1.4;">物件名稱
+                <input id="bpTitleInput" class="ctrl-input" placeholder="輸入物件名稱" />
+              </label>
+              <label class="field-label">畫布長 W
+                <input id="bpSizeW" type="number" min="16" max="96" value="40" class="ctrl-input" />
+              </label>
+              <label class="field-label">畫布寬 D
+                <input id="bpSizeL" type="number" min="16" max="96" value="40" class="ctrl-input" />
+              </label>
+              <label class="field-label">高度層 H
+                <input id="bpSizeH" type="number" min="16" max="80" value="44" class="ctrl-input" />
+              </label>
+            </div>
+
+            <div class="row-gap space-between" style="flex-wrap:wrap;">
+              <div class="row-gap" style="flex-wrap:wrap;">
+                <button id="btnAddPrimBox" class="btn btn-sub">＋ 方塊</button>
+                <button id="btnAddPrimCyl" class="btn btn-sub">＋ 圓柱</button>
+                <button id="btnAddPrimSph" class="btn btn-sub">＋ 球體</button>
+                <button id="btnAddPrimCone" class="btn btn-sub">＋ 圓錐</button>
+                <button id="btnAddPrimPyr" class="btn btn-sub">＋ 角錐</button>
+                <button id="btnAddPrimClear" class="btn btn-sub">－ 挖空</button>
+              </div>
+              <div class="row-gap" style="flex-wrap:wrap;">
+                <label class="inline-field" title="調整位置／長寬高後僅於記憶體即時重烘 360° 預覽（未確認儲存前絕不寫入資產庫）">
+                  <input id="bpAutoBakeChk" type="checkbox" checked /> ⚡ 自動即時預覽
+                </label>
+                <button id="btnPreviewBp" class="btn btn-sub" title="僅更新右側 360° 預覽轉盤，不寫入資產庫">👁️ 預覽</button>
+                <button id="btnBakeBp" class="btn btn-primary" title="確認將此 3D 藍圖與名稱儲存至資產庫">💾 確認儲存至資產庫</button>
+              </div>
+            </div>
+            <div id="bpUnsavedBadge" class="bp-unsaved-badge hidden">● 草稿尚未確認儲存（尚未寫入個人資產庫）</div>
+            <div id="bpPrimList" class="bp-prim-list"></div>
+            <details class="bp-json-details">
+              <summary>檢視／直接編輯原始 Blueprint JSON</summary>
+              <textarea id="bpJsonEditor" class="code-area" spellcheck="false"></textarea>
+            </details>
+          </div>
+
+          <div id="stPaneImport" class="st-pane">
+            <div class="import-box">
+              <h4>1. 🗂️ 個人跨世界資產庫（所有世界共用・可編輯／載入／刪除）</h4>
+              <p class="hint-text">個人生成、AI 建模或匯入的物件皆收錄於此，可跨世界載入、改名、進入積木藍圖細調或永久刪除。</p>
+              <div id="libraryList" class="library-list"></div>
+            </div>
+            <div class="import-box">
+              <h4>2. 🌍 本世界資產清單（可編輯改名／細調積木／從本世界移除）</h4>
+              <div id="worldAssetManageList" class="library-list"></div>
+            </div>
+            <div class="import-box">
+              <h4>3. 四視圖像素雕刻（TOP, SIDE, FRONT, BACK）</h4>
+              <div class="row-gap">
+                <input id="carveFileInput" type="file" accept="image/png,image/jpeg,image/webp" />
+                <input id="carveTitleInput" class="ctrl-input" placeholder="物件名稱" style="max-width:150px;" />
+                <label class="inline-field"><input id="carveRoundChk" type="checkbox" /> 圓柱修圓</label>
+                <button id="btnDoCarve" class="btn btn-primary">🗿 開始雕刻</button>
+              </div>
+            </div>
+            <div class="import-box">
+              <h4>4. 匯入既有 Sprite-Stacking 套件（.zip / blueprint.json / slices.png）</h4>
+              <div class="row-gap">
+                <input id="importAssetFile" type="file" accept=".zip,.json,image/png" />
+                <select id="importAssetCat" class="ctrl-select ctrl-compact">
+                  <option value="building">建築</option>
+                  <option value="character">人物</option>
+                  <option value="animal">動物</option>
+                  <option value="plant">植物</option>
+                  <option value="vehicle">載具</option>
+                  <option value="prop" selected>道具/家具</option>
+                </select>
+                <button id="btnDoImportAsset" class="btn btn-primary">📦 匯入套件</button>
+              </div>
+            </div>
+          </div>
+
+          <div id="stPaneAi" class="st-pane">
+            <p class="hint-text">支援 Google Gemma 4、Google Gemini（2.5 / 3 主流模型）及 OpenAI 相容端點；支援一鍵查詢帳號可用模型清單，亦可自由輸入最新模型名稱並於本機記憶／移除 API Key。</p>
+            <div class="form-grid">
+              <label class="field-label">模型供應商
+                <select id="aiProvider" class="ctrl-select">
+                  <option value="gemini">Google Gemini（2.5 / 3 主流模型）</option>
+                  <option value="gemma">Google Gemma 4（開放模型）</option>
+                  <option value="openai">OpenAI 相容端點（GPT / Ollama）</option>
+                </select>
+              </label>
+              <label class="field-label">模型名稱（可自由輸入或點選下方建議）
+                <div class="row-gap">
+                  <input id="aiModelInput" type="text" class="ctrl-input" style="flex:1;" value="gemini-2.5-flash" placeholder="輸入最新模型 ID（如 gemma-4-31b-it）" />
+                  <button id="btnFetchAiModels" type="button" class="btn btn-sub" title="使用您的 API Key 向官方 API 查詢真正可用的模型列表">🔍 查可用模型</button>
+                </div>
+              </label>
+            </div>
+            <div class="ai-chips-row">
+              <span class="hint-text">常用模型快捷選填：</span>
+              <div id="aiModelChips" class="chip-row"></div>
+            </div>
+            <div id="aiBaseUrlWrap" class="hidden">
+              <label class="field-label">OpenAI 相容 Base URL（選填，預設 https://api.openai.com/v1）
+                <input id="aiBaseUrlInput" type="text" class="ctrl-input" placeholder="例如：http://127.0.0.1:11434/v1 或 https://openrouter.ai/api/v1" />
+              </label>
+            </div>
+
+            <div class="import-box">
+              <div class="row-gap space-between">
+                <h4>🔑 API Key 管理（依供應商個別記憶於本機瀏覽器）</h4>
+                <span id="aiKeySavedBadge" class="mono-badge">未記憶</span>
+              </div>
+              <div class="row-gap">
+                <input id="aiKeyInput" type="password" class="ctrl-input" style="flex:1;" placeholder="請輸入 API Key（若已設系統環境變數可留空）" />
+                <button id="btnSaveAiKey" type="button" class="btn btn-sub">💾 記憶金鑰</button>
+                <button id="btnClearAiKey" type="button" class="btn btn-danger">🗑️ 移除金鑰</button>
+              </div>
+              <label class="inline-field">
+                <input id="aiRememberKeyChk" type="checkbox" checked /> 送出 AI 建模時自動記憶目前輸入的 API Key 與模型名稱
+              </label>
+              <div id="aiKeyStatusBadge" class="hint-text">檢查環境變數中...</div>
+            </div>
+
+            <label class="field-label">描述你想像的任何獨特 3D 物件</label>
+            <div class="row-gap">
+              <input id="aiPromptInput" class="ctrl-input" placeholder="例如：浮空蒸氣龐克鐘錶飛船、發光水晶噴泉..." />
+              <button id="btnAiGenerate" class="btn btn-primary">🚀 AI 建模</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="studio-right">
+          <div class="turntable-bar">
+            <span>360° 旋轉轉盤預覽</span>
+            <div class="seg-group" id="stLightGroup">
+              <button class="seg-btn active" data-stlight="day">白晝</button>
+              <button class="seg-btn" data-stlight="sunset">黃昏</button>
+              <button class="seg-btn" data-stlight="night">夜景發光</button>
+            </div>
+          </div>
+          <canvas id="studioPreviewCanvas" width="360" height="360"></canvas>
+          <div id="studioDiagBox" class="diag-box">尚未選擇或生成物件，請從左側生成或挑選原型。</div>
+          <div class="studio-actions">
+            <select id="studioCategorySelect" class="ctrl-select ctrl-compact">
+              <option value="building">建築</option>
+              <option value="character">人物</option>
+              <option value="animal">動物</option>
+              <option value="plant">植物</option>
+              <option value="vehicle">載具</option>
+              <option value="prop">道具/家具</option>
+            </select>
+            <button id="btnStudioUseAsset" class="btn btn-primary" disabled>✅ 加入資產庫並開始投放</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 重新命名目前世界 Modal -->
+  <div id="renameWorldModal" class="modal-backdrop hidden">
+    <div class="modal-card modal-sm">
+      <div class="modal-header">
+        <h3>✏️ 重新命名目前世界</h3>
+        <button class="modal-close" data-close-modal="renameWorldModal">✕</button>
+      </div>
+      <div class="modal-content">
+        <label class="field-label">世界名稱
+          <input id="rwNameInput" class="ctrl-input" placeholder="請輸入新的世界名稱" />
+        </label>
+        <label class="field-label">創作者署名
+          <input id="rwAuthorInput" class="ctrl-input" placeholder="像素建築師" />
+        </label>
+        <label class="field-label">世界簡介（選填）
+          <input id="rwDescInput" class="ctrl-input" placeholder="簡短介紹這個世界的主題與玩法" />
+        </label>
+        <div class="modal-footer">
+          <button id="btnConfirmRenameWorld" class="btn btn-primary">💾 儲存新名稱</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 新建主題世界 Modal（6 大戶外 + 6 大建築內部場景） -->
+  <div id="newWorldModal" class="modal-backdrop hidden">
+    <div class="modal-card modal-lg">
+      <div class="modal-header">
+        <h3>🌍 建立新場景世界（戶外探索 ＋ 建築物內部空間）</h3>
+        <button class="modal-close" data-close-modal="newWorldModal">✕</button>
+      </div>
+      <div class="modal-content">
+        <div class="form-grid">
+          <label class="field-label">世界名稱
+            <input id="nwNameInput" class="ctrl-input" value="我的夢幻新世界" />
+          </label>
+          <label class="field-label">創作者署名
+            <input id="nwAuthorInput" class="ctrl-input" value="像素建築師" />
+          </label>
+        </div>
+
+        <div class="sec-title">🌍 戶外宏觀探索場景（40×40）</div>
+        <div id="nwThemeCards" class="theme-grid">
+          <button class="theme-card active" data-theme="kingdom">🏰 奇幻星光王國<small>石崖城堡、護城河、騎士巡邏與煙火</small></button>
+          <button class="theme-card" data-theme="city">🏙️ CityRT 霓虹都會<small>十字大道、運河、摩天樓與公車環線</small></button>
+          <button class="theme-card" data-theme="farm">🌾 療癒陽光農莊<small>紅穀倉風車、向日葵麥田與牧場</small></button>
+          <button class="theme-card" data-theme="campus">🌸 櫻花青春校園<small>紅跑道操場、教學樓與上課鐘聲</small></button>
+          <button class="theme-card" data-theme="harbor">⚓ 海港燈塔小鎮<small>海灣碼頭、燈塔、帆船航線與海鷗</small></button>
+          <button class="theme-card" data-theme="blank">🌱 空白自由島嶼<small>純淨草地起手，100% 自由規劃</small></button>
+        </div>
+
+        <div class="sec-title">🏠 建築物內部立體剖面場景（24×24・含專屬家具與相遇事件）</div>
+        <div class="theme-grid">
+          <button class="theme-card" data-theme="palace_interior">👑 皇家宮殿大廳<small>紅毯御道、黃金王座、大理石柱與吊燈</small></button>
+          <button class="theme-card" data-theme="shop_interior">🛍️ 精品便利商店<small>收銀櫃檯、陳列貨架、甜點櫃與販賣機</small></button>
+          <button class="theme-card" data-theme="factory_interior">🏭 智慧自動化工廠<small>輸送帶、機械手臂、動力高爐與堆高機</small></button>
+          <button class="theme-card" data-theme="office_interior">💼 現代科技辦公室<small>電腦辦公桌、玻璃幕牆、會議桌與飲水機</small></button>
+          <button class="theme-card" data-theme="classroom_interior">📚 陽光活力教室<small>實木地板、黑板講台、課桌椅與下課互動</small></button>
+          <button class="theme-card" data-theme="home_interior">🛋️ 溫馨陽光住家<small>客廳沙發、發光電視櫃、廚房雙人床與柴犬</small></button>
+        </div>
+
+        <div class="modal-footer">
+          <button id="btnConfirmNewWorld" class="btn btn-primary">✨ 立即建立場景</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 背景音樂與自訂音檔 Modal -->
+  <div id="bgmModal" class="modal-backdrop hidden">
+    <div class="modal-card modal-sm">
+      <div class="modal-header">
+        <h3>🎵 背景音樂與自訂音樂設定</h3>
+        <button class="modal-close" data-close-modal="bgmModal">✕</button>
+      </div>
+      <div class="modal-content">
+        <div class="import-box">
+          <h4>內建風格配樂（5 種截然不同的編曲與拍號）</h4>
+          <select id="bgmPresetSelect" class="ctrl-select">
+            <option value="kingdom">🏰 奇幻王國・銅管定音鼓進行曲 (4/4・112 BPM)</option>
+            <option value="city">🏙️ 霓虹都會・Synthwave Funk 律動 (4/4・124 BPM)</option>
+            <option value="farm">🌾 陽光農莊・3/4 田園吉他華爾滋 (3/4・108 BPM)</option>
+            <option value="campus">🌸 青春校園・Chiptune 鐘琴輕快流行 (4/4・140 BPM)</option>
+            <option value="indoor">🛋️ 室內沙龍・Bossa Nova 爵士咖啡館 (4/4・84 BPM)</option>
+            <option value="off">🔇 關閉背景音樂</option>
+          </select>
+          <div id="bgmStyleInfo" class="bgm-style-card">載入風格介紹中...</div>
+          <div class="row-gap">
+            <button id="btnPreviewBgm" class="btn btn-accent-soft" style="flex:1;">🔊 立即試聽目前風格</button>
+          </div>
+          <div class="prop-row">
+            <label>音樂音量</label>
+            <input id="bgmVolumeSlider" type="range" min="0" max="1" step="0.05" value="0.45" />
+            <span id="bgmVolumeVal" class="mono-badge">45%</span>
+          </div>
+        </div>
+
+        <div class="import-box">
+          <h4>自訂背景音樂（直接封裝進 SQLite 世界檔）</h4>
+          <p id="customBgmStatus" class="hint-text">目前使用：內建程序化配樂</p>
+          <div class="row-gap">
+            <input id="bgmFileInput" type="file" accept=".mp3,.wav,.ogg,.m4a,audio/*" />
+            <button id="btnUploadBgm" class="btn btn-primary">⬆️ 上傳並播放</button>
+          </div>
+          <button id="btnDeleteBgm" class="btn btn-sub hidden">🔄 移除自訂音樂，改回內建配樂</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 玩家專屬角色（Avatar）選擇與自訂 Modal -->
+  <div id="playerModal" class="modal-backdrop hidden">
+    <div class="modal-card modal-lg">
+      <div class="modal-header">
+        <h3>🧑 我的玩家角色設定（化身探索這個世界）</h3>
+        <button class="modal-close" data-close-modal="playerModal">✕</button>
+      </div>
+      <div class="modal-content">
+        <div class="form-grid">
+          <label class="field-label">玩家角色暱稱
+            <input id="plNameInput" class="ctrl-input" placeholder="例如：勇者小疊" value="冒險玩家" />
+          </label>
+          <label class="field-label">角色體型倍率
+            <div class="row-gap">
+              <input id="plScaleSlider" type="range" min="0.5" max="2.5" step="0.05" value="1.0" style="flex:1;" />
+              <span id="plScaleVal" class="mono-badge">1.00x</span>
+            </div>
+          </label>
+        </div>
+
+        <div class="row-gap">
+          <button id="btnPlayerToCenter" class="btn btn-sub">📍 傳送到畫面中心</button>
+          <button id="btnFocusPlayer" class="btn btn-sub">🎥 鏡頭定位玩家</button>
+          <button id="btnPlayAsPlayer" class="btn btn-citywalk" style="flex:1;">🚶 立刻以這個角色開始漫步！</button>
+        </div>
+
+        <div class="sec-title">✨ 熱門人物／動物造型一鍵套用（無須手動生成，自動烘焙換裝）</div>
+        <div id="playerQuickPresets" class="chip-row">
+          <button class="chip-btn pl-quick" data-key="knight" data-label="巡邏騎士">🛡️ 巡邏騎士</button>
+          <button class="chip-btn pl-quick" data-key="mage" data-label="星辰法師">🧙 星辰法師</button>
+          <button class="chip-btn pl-quick" data-key="student" data-label="青春學生">🎒 青春學生</button>
+          <button class="chip-btn pl-quick" data-key="farmer" data-label="草帽農夫">🌾 草帽農夫</button>
+          <button class="chip-btn pl-quick" data-key="citizen" data-label="都市市民">🧥 都市市民</button>
+          <button class="chip-btn pl-quick" data-key="astronaut" data-label="星際太空人">👨‍🚀 太空人</button>
+          <button class="chip-btn pl-quick" data-key="lion" data-label="草原公獅">🦁 草原公獅</button>
+          <button class="chip-btn pl-quick" data-key="shiba" data-label="可愛柴犬">🐕 可愛柴犬</button>
+        </div>
+
+        <div class="sec-title">📦 或從本世界全部 Sprite-Stack 資產庫挑選（包含您親手設計的自創物件）</div>
+        <div id="playerAssetGrid" class="player-asset-grid"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 場景地圖擴大／尺寸調整 Modal -->
+  <div id="mapManageModal" class="modal-backdrop hidden">
+    <div class="modal-card modal-sm">
+      <div class="modal-header">
+        <h3>🗺️ 擴展場景地圖尺寸</h3>
+        <button class="modal-close" data-close-modal="mapManageModal">✕</button>
+      </div>
+      <div class="modal-content">
+        <p id="mapCurrentSize" class="hint-text">目前尺寸：40 × 40 格</p>
+        <div class="row-gap">
+          <button id="btnQuickExpandAll" class="btn btn-accent-soft" style="width:100%;">✨ 四周各擴展 4 格（+8 × +8）</button>
+        </div>
+        <div class="form-grid">
+          <label class="field-label">北側 (-Y) 增減格數
+            <input id="addNorth" type="number" min="-12" max="24" value="4" class="ctrl-input" />
+          </label>
+          <label class="field-label">南側 (+Y) 增減格數
+            <input id="addSouth" type="number" min="-12" max="24" value="4" class="ctrl-input" />
+          </label>
+          <label class="field-label">西側 (-X) 增減格數
+            <input id="addWest" type="number" min="-12" max="24" value="4" class="ctrl-input" />
+          </label>
+          <label class="field-label">東側 (+X) 增減格數
+            <input id="addEast" type="number" min="-12" max="24" value="4" class="ctrl-input" />
+          </label>
+        </div>
+        <div class="form-grid">
+          <label class="field-label">新增區域地貌材質
+            <select id="resizeGroundSelect" class="ctrl-select">
+              <option value="grass">🟩 草地</option>
+              <option value="sand">🟨 沙地</option>
+              <option value="stone">⬜ 石地</option>
+              <option value="water">🌊 水域</option>
+              <option value="wood_floor">🪵 室內木地板</option>
+              <option value="tile_floor">◽ 室內地磚</option>
+              <option value="concrete">⬛ 工業水泥地</option>
+            </select>
+          </label>
+          <label class="field-label">新增區域高度 (0..5)
+            <input id="resizeElevInput" type="number" min="0" max="5" value="1" class="ctrl-input" />
+          </label>
+        </div>
+        <p class="hint-text">擴展地圖後，所有既有建築、物件、路徑與事件座標會自動保持相對位置完整遷移！（上限 96×96 格）</p>
+        <div class="modal-footer">
+          <button id="btnApplyResize" class="btn btn-primary">📐 確認套用擴展</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 好友分享（完整分享 .stackworld.db ＋ 單純遊戲分享 .html）Modal -->
+  <div id="shareModal" class="modal-backdrop hidden">
+    <div class="modal-card modal-sm">
+      <div class="modal-header">
+        <h3>🤝 分享我的遊戲與世界給好友</h3>
+        <button class="modal-close" data-close-modal="shareModal">✕</button>
+      </div>
+      <div class="modal-content">
+        <div class="import-box share-mode-card">
+          <h4>📤 方式一：完整分享（<code>.stackworld.db</code>・好友可參觀亦可編輯擴建）</h4>
+          <p class="hint-text">將所有 Sprite-Stack 貼圖、藍圖、地形、路徑、事件與自訂音樂封裝在單一 SQLite 檔案內。適合與創作夥伴共享，對方匯入後可自由改圖、加物件與繼續擴建。</p>
+          <button id="btnExportWorldDb" class="btn btn-primary" style="width:100%;">⬇️ 下載完整分享檔（.stackworld.db）</button>
+        </div>
+
+        <div class="import-box share-mode-card playonly-card">
+          <h4>🎮 方式二：單純遊戲分享（獨立 <code>.html</code> 網頁檔・純玩家闖關不可修改）</h4>
+          <p class="hint-text">匯出單一自包含網頁檔，好友<strong>免裝程式、雙擊即可直接在瀏覽器以玩家身分遊玩</strong>您規劃好的關卡、音樂、互動與 NPC，且完全鎖定無法進入編輯模式或改動任何內容。</p>
+          <div class="row-gap">
+            <button id="btnExportPlayHtml" class="btn btn-gold" style="flex:1.4;">🎮 下載單純遊戲網頁檔（.html）</button>
+            <a id="btnPreviewPlayHtml" class="btn btn-sub" target="_blank" rel="noopener" href="#">👁️ 新分頁試玩</a>
+          </div>
+        </div>
+
+        <div class="import-box">
+          <h4>📥 載入好友完整分享的世界（<code>.stackworld.db</code>）</h4>
+          <p class="hint-text">匯入後可直接選擇以「好友參觀模式」闖關，或開啟「編輯模式」一起擴建！</p>
+          <div class="row-gap">
+            <input id="importWorldFile" type="file" accept=".db,.stackworld.db" />
+            <button id="btnImportWorldDb" class="btn btn-accent-soft">🌍 匯入世界</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 快照管理 Modal -->
+  <div id="snapshotModal" class="modal-backdrop hidden">
+    <div class="modal-card modal-sm">
+      <div class="modal-header">
+        <h3>📸 SQLite 世界快照與還原</h3>
+        <button class="modal-close" data-close-modal="snapshotModal">✕</button>
+      </div>
+      <div class="modal-content">
+        <div class="row-gap">
+          <input id="snapLabelInput" class="ctrl-input" placeholder="快照備註（例如：蓋好城堡前）" />
+          <button id="btnCreateSnapshot" class="btn btn-primary">💾 建立快照</button>
+        </div>
+        <div id="snapshotList" class="snapshot-list"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- NPC／物件任務互動與考驗對話 Modal -->
+  <div id="encounterModal" class="modal-backdrop hidden">
+    <div class="modal-card modal-sm">
+      <div class="modal-header">
+        <div class="row-gap">
+          <span id="encIcon" style="font-size:22px;">💬</span>
+          <div>
+            <h3 id="encTitle">事件互動</h3>
+            <p id="encSubtitle">來自場景物件</p>
+          </div>
+        </div>
+        <button class="modal-close" data-close-modal="encounterModal">✕</button>
+      </div>
+      <div id="encBody" class="modal-content"></div>
+    </div>
+  </div>
+
+  <!-- 過關慶賀視窗 Modal -->
+  <div id="victoryModal" class="modal-backdrop hidden">
+    <div class="modal-card modal-sm victory-card">
+      <div class="victory-banner">
+        <div class="victory-trophy">🏆</div>
+        <h2 id="victoryTitle">🎉 恭喜完成關卡目標！</h2>
+        <p id="victoryMessage">太厲害了！你已順利達成這個世界的所有挑戰目標！</p>
+      </div>
+      <div class="modal-content">
+        <div id="victoryStats" class="vic-stats-grid"></div>
+        <div class="row-gap" style="margin-top:6px;">
+          <button id="btnVicReplay" class="btn btn-sub" style="flex:1;">🔄 清除進度再玩一次</button>
+          <button id="btnVicContinue" class="btn btn-gold" style="flex:1.2;">🎉 繼續探索世界</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 清除遊戲進度／回復初始值／刪除本世界確認 Modal -->
+  <div id="resetModal" class="modal-backdrop hidden">
+    <div class="modal-card modal-sm">
+      <div class="modal-header">
+        <h3>🔄 重置遊戲進度、初始狀態或刪除本遊戲</h3>
+        <button class="modal-close" data-close-modal="resetModal">✕</button>
+      </div>
+      <div class="modal-content">
+        <div class="reset-choice-card">
+          <h4>🎮 選項 A：清除遊玩進度（保留目前創作場景）</h4>
+          <p class="hint-text">將積分、血量、護盾、道具、線索筆記、任務進度與玩家位置全部歸零，但不影響您親手放置與修改的建築、物件、路徑與事件，適合重玩關卡或給朋友挑戰！</p>
+          <button id="btnDoResetProgress" class="btn btn-primary" style="width:100%;">✨ 確認清除遊玩進度</button>
+        </div>
+        <div class="reset-choice-card">
+          <h4>♻️ 選項 B：回復世界初始出廠狀態</h4>
+          <p class="hint-text">將整個世界（包含地形、所有建築物件、路徑、事件與任務進度）徹底恢復成最初建立／匯入時的初始狀態。</p>
+          <button id="btnDoResetInitial" class="btn btn-sub" style="width:100%;">♻️ 確認回復世界初始狀態</button>
+        </div>
+        <div class="reset-choice-card danger-card">
+          <h4>🗑️ 選項 C：刪除此世界（永久刪除本遊戲）</h4>
+          <p class="hint-text">將目前開啟的世界「<strong id="deleteWorldTargetName">目前世界</strong>」及其 SQLite 存檔徹底移除（若為最後一個世界，系統會自動建立一個新的預設世界）。</p>
+          <button id="btnAskDeleteWorld" class="btn btn-danger" style="width:100%;">🗑️ 刪除這個世界...</button>
+          <div id="deleteWorldConfirmBox" class="delete-confirm-box hidden">
+            <span>⚠️ 此操作無法復原！確定永久刪除此世界嗎？</span>
+            <div class="row-gap">
+              <button id="btnCancelDeleteWorld" class="btn btn-sub" style="flex:1;">取消</button>
+              <button id="btnConfirmDeleteWorld" class="btn btn-danger" style="flex:1;">🔥 確定永久刪除</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="/js/main.js"></script>
+</body>
+</html>
