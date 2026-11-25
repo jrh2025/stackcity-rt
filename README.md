@@ -2,6 +2,14 @@
 
 結合 **CityRT 即時微縮城市互動體驗** 與 **Sprite-Stacking（精靈堆疊）偽 3D 像素體素造物技術** 的單一執行檔創意導演沙盒（Rust + SQLite + WebGL2）。
 
+## ⬇️ 立即下載（Windows 免安裝單一執行檔）
+
+- **[⬇️ 下載 `stackcity-rt.exe`（Windows 10/11 64 位元・約 12.9 MB）](https://github.com/jrh2025/stackcity-rt/raw/main/releases/stackcity-rt.exe)**
+
+> **零環境依賴、下載即玩**：已將 SQLite 資料庫引擎與完整 3D WebGL2 網頁介面打包於單一 `.exe` 中，**無需安裝 Rust、Python、Node.js 或任何資料庫**。
+> 1. 請將下載的 `stackcity-rt.exe` 放入任意可寫入的資料夾，直接**雙擊執行**，程式會自動初始化 `worlds/` 存檔目錄並開啟瀏覽器（支援 **繁體中文 / English / 日本語** 依系統語系自動偵測與即時切換）。
+> 2. 若 Windows 初次啟動顯示 SmartScreen 保護提示，請點選「**其他資訊 → 仍要執行**」。
+
 ## 核心特色
 
 1. **純 Rust Sprite-Stacking 造物工坊（零 Python 依賴）**

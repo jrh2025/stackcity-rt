@@ -1,7 +1,13 @@
 @echo off
 chcp 65001 >nul
 cd /d "%~dp0"
-if exist "target\release\stackcity-rt.exe" (
+if exist "stackcity-rt.exe" (
+    echo 正在啟動《StackCity RT（像素疊界）》...
+    start "" "stackcity-rt.exe" --data-dir ".\worlds"
+) else if exist "releases\stackcity-rt.exe" (
+    echo 正在啟動《StackCity RT（像素疊界）》...
+    start "" "releases\stackcity-rt.exe" --data-dir ".\worlds"
+) else if exist "target\release\stackcity-rt.exe" (
     echo 正在啟動《StackCity RT（像素疊界）》...
     start "" "target\release\stackcity-rt.exe" --data-dir ".\worlds"
 ) else (
