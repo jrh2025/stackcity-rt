@@ -87,6 +87,14 @@ const PRESETS: &[PresetDef] = &[
         keywords: &["小店", "拉麵", "咖啡", "商店", "便利店", "攤位", "shop", "cafe", "ramen"],
     },
     PresetDef {
+        key: "coffee_bar",
+        name: "精品咖啡茶水吧",
+        category: "prop",
+        default_scale: 0.88,
+        anim_preset: "static",
+        keywords: &["咖啡吧", "茶水吧", "咖啡機", "義式咖啡", "coffee bar", "espresso"],
+    },
+    PresetDef {
         key: "barn",
         name: "紅頂穀倉",
         category: "building",
@@ -176,6 +184,14 @@ const PRESETS: &[PresetDef] = &[
         keywords: &["農夫", "農民", "園丁", "farmer"],
     },
     PresetDef {
+        key: "office_lady",
+        name: "粉領女上班族",
+        category: "character",
+        default_scale: 0.70,
+        anim_preset: "walk",
+        keywords: &["女上班族", "上班族", "粉領族", "OL", "office lady", "office worker"],
+    },
+    PresetDef {
         key: "citizen",
         name: "都市市民",
         category: "character",
@@ -215,6 +231,14 @@ const PRESETS: &[PresetDef] = &[
         default_scale: 0.65,
         anim_preset: "walk",
         keywords: &["綿羊", "小羊", "羊", "sheep", "lamb"],
+    },
+    PresetDef {
+        key: "carriage",
+        name: "皇家馬車",
+        category: "vehicle",
+        default_scale: 1.05,
+        anim_preset: "bob",
+        keywords: &["馬車", "皇家馬車", "篷車", "雙馬車", "carriage", "wagon", "coach"],
     },
     PresetDef {
         key: "horse",
@@ -297,6 +321,14 @@ const PRESETS: &[PresetDef] = &[
         default_scale: 0.82,
         anim_preset: "bob",
         keywords: &["跑車", "汽車", "轎車", "車子", "賽車", "car", "sports car"],
+    },
+    PresetDef {
+        key: "bus_stop",
+        name: "公車站牌候車亭",
+        category: "prop",
+        default_scale: 0.92,
+        anim_preset: "static",
+        keywords: &["公車站", "候車亭", "站牌", "巴士站", "bus stop"],
     },
     PresetDef {
         key: "bus",
@@ -512,6 +544,14 @@ const PRESETS: &[PresetDef] = &[
         keywords: &["辦公椅", "電腦椅", "轉椅", "office chair"],
     },
     PresetDef {
+        key: "printer",
+        name: "多功能事務印表機",
+        category: "prop",
+        default_scale: 0.82,
+        anim_preset: "static",
+        keywords: &["印表機", "影印機", "事務機", "printer", "copier"],
+    },
+    PresetDef {
         key: "bookshelf",
         name: "木頭書櫃",
         category: "prop",
@@ -593,6 +633,14 @@ const PRESETS: &[PresetDef] = &[
         keywords: &["廚房", "流理台", "爐灶", "瓦斯爐", "kitchen", "stove"],
     },
     PresetDef {
+        key: "sink_vanity",
+        name: "浴室洗手台鏡櫃",
+        category: "prop",
+        default_scale: 0.85,
+        anim_preset: "static",
+        keywords: &["洗手台", "洗臉台", "盥洗台", "鏡櫃", "sink", "vanity"],
+    },
+    PresetDef {
         key: "potted_plant",
         name: "室內綠意盆栽",
         category: "plant",
@@ -600,9 +648,25 @@ const PRESETS: &[PresetDef] = &[
         anim_preset: "sway",
         keywords: &["盆栽", "花盆", "盆景", "potted plant", "plant"],
     },
+    PresetDef {
+        key: "wooden_door",
+        name: "古典木門",
+        category: "prop",
+        default_scale: 0.92,
+        anim_preset: "static",
+        keywords: &["木門", "大門", "房門", "建築門", "入口門", "出口門", "wooden door", "door"],
+    },
+    PresetDef {
+        key: "portal_gate",
+        name: "星光傳送門",
+        category: "prop",
+        default_scale: 1.0,
+        anim_preset: "bob",
+        keywords: &["傳送門", "光門", "時空門", "magic portal", "portal"],
+    },
 ];
 
-/// 回傳所有 68 種預設物件目錄清單
+/// 回傳所有 76 種預設物件目錄清單
 pub fn list_presets() -> Vec<PresetCatalogItem> {
     PRESETS
         .iter()
@@ -1306,6 +1370,38 @@ pub fn build_blueprint_for_spec(spec: &ParsedPrompt, slices: usize) -> Value {
                 ]
             })
         }
+        "carriage" => {
+            let body = p_col("red");
+            let wood = s_col("wood");
+            json!({
+                "title": title,
+                "size": [34, 58, 36],
+                "primitives": [
+                    // 前方拉車駿馬（y: 34..54，車頭朝 +Y）
+                    {"type": "box", "x0": 13, "y0": 37, "z0": 0, "x1": 15, "y1": 40, "z1": 11, "color": "white", "material": "fur", "mirror_x": true},
+                    {"type": "box", "x0": 13, "y0": 47, "z0": 0, "x1": 15, "y1": 50, "z1": 11, "color": "white", "material": "fur", "mirror_x": true},
+                    {"type": "sphere", "cx": 16.5, "cy": 43.5, "cz": 12.5, "rx": 4.2, "ry": 8.0, "rz": 4.2, "color": "white", "material": "fur"},
+                    {"type": "line", "p0": [16.5, 48.0, 14.5], "p1": [16.5, 52.0, 22.0], "radius": 2.6, "color": "white", "material": "fur"},
+                    {"type": "box", "x0": 14, "y0": 50, "z0": 20, "x1": 19, "y1": 56, "z1": 25, "color": "white", "material": "fur"},
+                    {"type": "line", "p0": [16.5, 46.5, 17.0], "p1": [16.5, 50.5, 25.0], "radius": 1.3, "color": "gold", "material": "mane"},
+                    // 木質拉車轅桿連接車身與馬匹
+                    {"type": "line", "p0": [11.0, 27.0, 9.0], "p1": [13.0, 44.0, 11.5], "radius": 1.0, "color": wood, "material": "wood", "mirror_x": true},
+                    // 後方古典車廂與四輪（y: 4..30）
+                    {"type": "cylinder", "cx": 6.5, "cy": 10.0, "z0": 0, "z1": 10, "rx": 2.2, "ry": 5.0, "color": "dark_wood", "material": "wood", "mirror_x": true},
+                    {"type": "cylinder", "cx": 6.5, "cy": 24.0, "z0": 0, "z1": 10, "rx": 2.2, "ry": 5.0, "color": "dark_wood", "material": "wood", "mirror_x": true},
+                    {"type": "box", "x0": 8, "y0": 5, "z0": 5, "x1": 26, "y1": 29, "z1": 9, "color": wood, "material": "wood"},
+                    // 車夫前座
+                    {"type": "box", "x0": 10, "y0": 24, "z0": 9, "x1": 24, "y1": 30, "z1": 15, "color": wood, "material": "wood"},
+                    // 華麗車廂主體、金邊與車窗
+                    {"type": "box", "x0": 8, "y0": 6, "z0": 9, "x1": 26, "y1": 24, "z1": 25, "color": body, "material": "wood"},
+                    {"type": "box", "x0": 7, "y0": 10, "z0": 15, "x1": 27, "y1": 20, "z1": 21, "color": "sky", "material": "glass"},
+                    {"type": "box", "x0": 7, "y0": 5, "z0": 25, "x1": 27, "y1": 25, "z1": 29, "color": "gold", "material": "metal"},
+                    {"type": "box", "x0": 9, "y0": 7, "z0": 29, "x1": 25, "y1": 23, "z1": 33, "color": body, "material": "fabric"},
+                    // 車側夜光提燈
+                    {"type": "box", "x0": 7, "y0": 22, "z0": 16, "x1": 9, "y1": 25, "z1": 20, "color": "neon_yellow", "emissive": true, "mirror_x": true}
+                ]
+            })
+        }
         "sailboat" => {
             let wood = p_col("wood");
             let sail = s_col("white");
@@ -1787,6 +1883,157 @@ pub fn build_blueprint_for_spec(spec: &ParsedPrompt, slices: usize) -> Value {
                     {"type": "cylinder", "cx": 12.5, "cy": 12.5, "z0": 10, "z1": 20, "rx": 2.0, "ry": 2.0, "color": "wood", "material": "wood"},
                     {"type": "sphere", "cx": 12.5, "cy": 12.5, "cz": 24.0, "rx": 8.0, "ry": 8.0, "rz": 7.5, "color": leaf, "material": "foliage"},
                     {"type": "sphere", "cx": 9.0, "cy": 14.0, "cz": 29.0, "rx": 4.5, "ry": 4.5, "rz": 4.5, "color": leaf, "material": "foliage", "mirror_x": true}
+                ]
+            })
+        }
+        "wooden_door" => {
+            let door_col = p_col("wood");
+            let frame_col = s_col("stone");
+            json!({
+                "title": title,
+                "size": [30, 18, 40],
+                "primitives": [
+                    // 門口石階與門框
+                    {"type": "box", "x0": 4, "y0": 5, "z0": 0, "x1": 26, "y1": 15, "z1": 3, "color": frame_col, "material": "stone"},
+                    {"type": "box", "x0": 5, "y0": 6, "z0": 3, "x1": 9, "y1": 12, "z1": 34, "color": frame_col, "material": "stone", "mirror_x": true},
+                    {"type": "box", "x0": 5, "y0": 6, "z0": 32, "x1": 25, "y1": 12, "z1": 37, "color": frame_col, "material": "stone"},
+                    // 雙開木門主體與中央門縫裝飾
+                    {"type": "box", "x0": 9, "y0": 7, "z0": 3, "x1": 21, "y1": 11, "z1": 32, "color": door_col, "material": "wood"},
+                    {"type": "box", "x0": 14, "y0": 10, "z0": 3, "x1": 16, "y1": 12, "z1": 32, "color": "dark_wood", "material": "wood"},
+                    // 雙側金色門把（朝 +Y 正面）
+                    {"type": "box", "x0": 11, "y0": 11, "z0": 15, "x1": 13, "y1": 13, "z1": 19, "color": "gold", "material": "metal", "mirror_x": true},
+                    // 門楣暖黃夜光門燈
+                    {"type": "box", "x0": 13, "y0": 11, "z0": 34, "x1": 17, "y1": 14, "z1": 38, "color": "neon_yellow", "emissive": true}
+                ]
+            })
+        }
+        "portal_gate" => {
+            let stone = p_col("dark_stone");
+            let glow_col = s_col("neon_cyan");
+            json!({
+                "title": title,
+                "size": [36, 18, 44],
+                "primitives": [
+                    // 符文底座與雙石柱
+                    {"type": "box", "x0": 3, "y0": 4, "z0": 0, "x1": 33, "y1": 15, "z1": 4, "color": stone, "material": "stone"},
+                    {"type": "box", "x0": 5, "y0": 6, "z0": 4, "x1": 10, "y1": 12, "z1": 36, "color": stone, "material": "stone", "mirror_x": true},
+                    {"type": "box", "x0": 4, "y0": 5, "z0": 34, "x1": 32, "y1": 13, "z1": 40, "color": stone, "material": "stone"},
+                    {"type": "box", "x0": 14, "y0": 7, "z0": 40, "x1": 22, "y1": 11, "z1": 43, "color": "gold", "material": "metal"},
+                    // 兩側符文點綴
+                    {"type": "box", "x0": 6, "y0": 11, "z0": 16, "x1": 9, "y1": 13, "z1": 24, "color": glow_col, "emissive": true, "mirror_x": true},
+                    // 中央發光傳送光幕
+                    {"type": "box", "x0": 10, "y0": 8, "z0": 4, "x1": 26, "y1": 10, "z1": 34, "color": glow_col, "material": "crystal", "emissive": true}
+                ]
+            })
+        }
+        "office_lady" => {
+            let blazer = p_col("sakura");
+            let skirt = s_col("navy");
+            let hair = "brown";
+            json!({
+                "title": title,
+                "size": [30, 30, 40],
+                "primitives": [
+                    // 高跟鞋與雙腿
+                    {"type": "box", "x0": 11, "y0": 12, "z0": 0, "x1": 14, "y1": 17, "z1": 4, "color": skirt, "material": "fabric", "mirror_x": true},
+                    {"type": "box", "x0": 11, "y0": 12, "z0": 4, "x1": 14, "y1": 16, "z1": 10, "color": "skin", "mirror_x": true},
+                    // 深藍窄裙
+                    {"type": "box", "x0": 10, "y0": 11, "z0": 9, "x1": 20, "y1": 18, "z1": 16, "color": skirt, "material": "fabric"},
+                    // 白襯衫與合身西裝外套
+                    {"type": "box", "x0": 10, "y0": 11, "z0": 16, "x1": 20, "y1": 18, "z1": 24, "color": blazer, "material": "fabric"},
+                    {"type": "box", "x0": 13, "y0": 17, "z0": 18, "x1": 17, "y1": 19, "z1": 24, "color": "white", "material": "fabric"},
+                    // 雙臂與右側通勤托特包
+                    {"type": "box", "x0": 7, "y0": 12, "z0": 14, "x1": 10, "y1": 17, "z1": 23, "color": blazer, "material": "fabric", "mirror_x": true},
+                    {"type": "box", "x0": 21, "y0": 11, "z0": 7, "x1": 25, "y1": 19, "z1": 15, "color": "wood", "material": "fabric"},
+                    // 頭部與馬尾長髮
+                    {"type": "sphere", "cx": 14.5, "cy": 14.5, "cz": 28.5, "rx": 5.0, "ry": 4.8, "rz": 4.9, "color": "skin"},
+                    {"type": "sphere", "cx": 14.5, "cy": 13.0, "cz": 30.5, "rx": 5.3, "ry": 4.8, "rz": 4.8, "color": hair, "material": "fur"},
+                    {"type": "box", "x0": 12, "y0": 7, "z0": 19, "x1": 18, "y1": 11, "z1": 31, "color": hair, "material": "fur"},
+                    // 雙眼
+                    {"type": "box", "x0": 11, "y0": 18, "z0": 27, "x1": 13, "y1": 20, "z1": 29, "color": "black", "shaded": false, "mirror_x": true}
+                ]
+            })
+        }
+        "bus_stop" => {
+            let shelter = p_col("sky");
+            let pole = s_col("blue");
+            json!({
+                "title": title,
+                "size": [40, 24, 42],
+                "primitives": [
+                    // 水泥站台地基
+                    {"type": "box", "x0": 2, "y0": 4, "z0": 0, "x1": 38, "y1": 20, "z1": 3, "color": "stone", "material": "stone"},
+                    // 候車亭背板玻璃與支柱
+                    {"type": "box", "x0": 5, "y0": 5, "z0": 3, "x1": 25, "y1": 8, "z1": 27, "color": shelter, "material": "glass"},
+                    {"type": "box", "x0": 4, "y0": 4, "z0": 3, "x1": 7, "y1": 9, "z1": 29, "color": "dark_gray", "material": "metal"},
+                    {"type": "box", "x0": 23, "y0": 4, "z0": 3, "x1": 26, "y1": 9, "z1": 29, "color": "dark_gray", "material": "metal"},
+                    // 遮陽雨棚
+                    {"type": "box", "x0": 3, "y0": 4, "z0": 28, "x1": 28, "y1": 18, "z1": 32, "color": pole, "material": "metal"},
+                    // 候車長椅
+                    {"type": "box", "x0": 8, "y0": 9, "z0": 3, "x1": 22, "y1": 14, "z1": 10, "color": "wood", "material": "wood"},
+                    // 右側發光公車站牌柱
+                    {"type": "cylinder", "cx": 33.0, "cy": 12.0, "z0": 3, "z1": 32, "rx": 1.6, "ry": 1.6, "color": "silver", "material": "metal"},
+                    {"type": "box", "x0": 29, "y0": 10, "z0": 25, "x1": 37, "y1": 15, "z1": 37, "color": pole, "material": "metal"},
+                    {"type": "box", "x0": 30, "y0": 14, "z0": 27, "x1": 36, "y1": 16, "z1": 35, "color": "neon_yellow", "emissive": true}
+                ]
+            })
+        }
+        "coffee_bar" => {
+            let counter = p_col("dark_wood");
+            let machine = s_col("silver");
+            json!({
+                "title": title,
+                "size": [40, 24, 34],
+                "primitives": [
+                    // 吧台底座與大理石檯面
+                    {"type": "box", "x0": 4, "y0": 5, "z0": 0, "x1": 36, "y1": 19, "z1": 15, "color": counter, "material": "wood"},
+                    {"type": "box", "x0": 3, "y0": 4, "z0": 15, "x1": 37, "y1": 20, "z1": 18, "color": "marble", "material": "stone"},
+                    // 義式咖啡機本體與指示燈
+                    {"type": "box", "x0": 8, "y0": 7, "z0": 18, "x1": 21, "y1": 15, "z1": 30, "color": machine, "material": "metal"},
+                    {"type": "box", "x0": 10, "y0": 14, "z0": 25, "x1": 19, "y1": 16, "z1": 28, "color": "neon_yellow", "emissive": true},
+                    // 馬克杯與點心盤
+                    {"type": "cylinder", "cx": 27.5, "cy": 13.0, "z0": 18, "z1": 24, "rx": 2.4, "ry": 2.4, "color": "white", "material": "stone"},
+                    {"type": "cylinder", "cx": 32.5, "cy": 12.5, "z0": 18, "z1": 21, "rx": 2.8, "ry": 2.8, "color": "gold", "material": "stone"}
+                ]
+            })
+        }
+        "printer" => {
+            let body = p_col("white");
+            let trim = s_col("dark_gray");
+            json!({
+                "title": title,
+                "size": [34, 28, 34],
+                "primitives": [
+                    // 下層紙匣底座
+                    {"type": "box", "x0": 5, "y0": 6, "z0": 0, "x1": 29, "y1": 22, "z1": 14, "color": trim, "material": "metal"},
+                    // 主體白色印表機身
+                    {"type": "box", "x0": 4, "y0": 5, "z0": 14, "x1": 30, "y1": 23, "z1": 27, "color": body, "material": "metal"},
+                    // 頂部掃描蓋板
+                    {"type": "box", "x0": 5, "y0": 6, "z0": 27, "x1": 27, "y1": 22, "z1": 30, "color": "silver", "material": "metal"},
+                    // 右側已列印白紙輸出托盤
+                    {"type": "box", "x0": 26, "y0": 9, "z0": 20, "x1": 33, "y1": 19, "z1": 23, "color": "white", "shaded": false},
+                    // 前方發光觸控面板
+                    {"type": "box", "x0": 8, "y0": 22, "z0": 21, "x1": 19, "y1": 25, "z1": 25, "color": "neon_cyan", "emissive": true}
+                ]
+            })
+        }
+        "sink_vanity" => {
+            let cabinet = p_col("wood");
+            let basin = s_col("sky");
+            json!({
+                "title": title,
+                "size": [36, 22, 40],
+                "primitives": [
+                    // 浴室收納木櫃
+                    {"type": "box", "x0": 5, "y0": 5, "z0": 0, "x1": 31, "y1": 18, "z1": 14, "color": cabinet, "material": "wood"},
+                    // 大理石檯面與淺藍洗手盆
+                    {"type": "box", "x0": 4, "y0": 4, "z0": 14, "x1": 32, "y1": 19, "z1": 17, "color": "marble", "material": "stone"},
+                    {"type": "box", "x0": 10, "y0": 8, "z0": 17, "x1": 26, "y1": 17, "z1": 19, "color": basin, "material": "glass"},
+                    // 銀色水龍頭
+                    {"type": "box", "x0": 16, "y0": 7, "z0": 17, "x1": 20, "y1": 11, "z1": 23, "color": "silver", "material": "metal"},
+                    // 後方明鏡與頂部暖黃化妝鏡燈
+                    {"type": "box", "x0": 7, "y0": 5, "z0": 21, "x1": 29, "y1": 8, "z1": 36, "color": "ice", "material": "glass"},
+                    {"type": "box", "x0": 11, "y0": 7, "z0": 35, "x1": 25, "y1": 10, "z1": 38, "color": "neon_yellow", "emissive": true}
                 ]
             })
         }

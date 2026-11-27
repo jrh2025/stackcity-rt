@@ -1,6 +1,12 @@
 //! 工具模式控制器：選取、場景拖曳、生態規則筆刷、地形／室內地貌塑形、智慧鋪路與右欄 XYZ 縮放屬性編輯器。
 
 import { describeRulePlain } from "./events_ui.js";
+import {
+  buildEntityMetaWithPortal,
+  buildEntityMetaWithVehicle,
+  parseEntityPortal,
+  parseEntityVehicle,
+} from "./simulation.js";
 import { escapeHtml } from "./studio.js";
 
 export class ToolController {
@@ -215,7 +221,7 @@ export class ToolController {
       container.innerHTML = `
         <div class="prop-card">
           <strong>未選取任何場景物件</strong>
-          <p class="hint-text">在左側選擇「🖱️ 選取」工具並點擊 3D 世界中的任何建築、人物、動物、植物、家具或載具，即可獨立調整長寬高 (X/Y/Z)、旋轉、浮空高度、解除附掛、直接指派路徑與事件或設定任務考驗！</p>
+          <p class="hint-text">在左側選擇「🖱️ 選取」工具並點擊 3D 世界中的任何建築、人物、動物、植物、家具或載具，即可獨立調整長寬高 (X/Y/Z)、旋轉、浮空高度、解除附掛、直接指派路徑與事件、設定交通工具搭乘或建築物門與任務考驗！</p>
         </div>`;
       return;
     }
@@ -262,6 +268,153 @@ export class ToolController {
       if (c.entity_id === entity.id || c.entity_a === entity.id || c.entity_b === entity.id) return true;
       return (r.actions || []).some((a) => a.entity_id === entity.id);
     });
+
+    const resolvedVeh = this.app.sim.getVehicleConfig(entity);
+    const vehEnabled = Boolean(resolvedVeh);
+    const vehMode = resolvedVeh?.mode || "drive";
+    const vehSeatStyle = resolvedVeh?.seat_style || "ride_on";
+    const vehSpeedMul = Number(resolvedVeh?.speed_mul ?? 1.6);
+    const vehSeatZ = Number(resolvedVeh?.seat_z ?? 0.52);
+    const vehSeatFwd = Number(resolvedVeh?.seat_forward ?? 0.0);
+
+    const vehCardHtml = `
+      <div class="prop-card">
+        <div class="row-gap space-between">
+          <strong>🚗 交通工具搭乘設定</strong>
+          <label class="inline-field">
+            <input id="insVehEnable" type="checkbox" ${vehEnabled ? "checked" : ""} />
+            <span>允許玩家按 G 搭乘</span>
+          </label>
+        </div>
+        ${vehEnabled ? `
+          <div class="prop-row">
+            <label>搭乘模式</label>
+            <select id="insVehMode" class="ctrl-select" style="flex:1;">
+              <option value="drive" ${vehMode === "drive" ? "selected" : ""}>🎮 玩家親自駕駛／騎乘</option>
+              <option value="passenger" ${vehMode === "passenger" ? "selected" : ""}>🚌 自動巡航乘客 (僅搭乘)</option>
+              <option value="both" ${vehMode === "both" ? "selected" : ""}>🔄 兩者皆可 (Tab 鍵切換)</option>
+            </select>
+          </div>
+          <div class="prop-row">
+            <label>乘載外觀</label>
+            <select id="insVehSeatStyle" class="ctrl-select" style="flex:1;">
+              <option value="ride_on" ${vehSeatStyle === "ride_on" ? "selected" : ""}>🐎 開放式騎乘 (顯示玩家)</option>
+              <option value="inside" ${vehSeatStyle === "inside" ? "selected" : ""}>🚗 密閉車廂 (隱藏玩家)</option>
+            </select>
+          </div>
+          <div class="prop-row">
+            <label>移動倍率</label>
+            <input id="insVehSpeed" type="range" min="0.6" max="3.5" step="0.05" value="${vehSpeedMul.toFixed(2)}" />
+            <span id="insVehSpeedVal" class="mono-badge">${vehSpeedMul.toFixed(2)}x</span>
+          </div>
+          ${vehSeatStyle === "ride_on" ? `
+            <div class="prop-row">
+              <label>座位高度</label>
+              <input id="insVehSeatZ" type="range" min="0.0" max="2.0" step="0.05" value="${vehSeatZ.toFixed(2)}" />
+              <span id="insVehSeatZVal" class="mono-badge">${vehSeatZ.toFixed(2)}</span>
+            </div>
+            <div class="prop-row">
+              <label>前後偏移</label>
+              <input id="insVehSeatFwd" type="range" min="-0.8" max="0.8" step="0.05" value="${vehSeatFwd.toFixed(2)}" />
+              <span id="insVehSeatFwdVal" class="mono-badge">${vehSeatFwd.toFixed(2)}</span>
+            </div>
+          ` : ""}
+        ` : `<div class="hint-text">勾選上方開關後，玩家靠近此物件按下 G 鍵即可駕駛或搭乘！</div>`}
+      </div>`;
+
+    const resolvedPortal = parseEntityPortal(entity);
+    const portalEnabled = Boolean(resolvedPortal);
+    const entMetaCat = this.app.assetMap.get(entity.asset_id)?.category || "prop";
+    const defaultPortalFwd = entMetaCat === "building" ? 1.15 : 0.45;
+    const portalKind = resolvedPortal?.kind || "enter";
+    const portalLabel = resolvedPortal?.label || `進入「${entity.name}」`;
+    const portalTargetId = resolvedPortal?.target_world_id || "";
+    const portalTx = Number(resolvedPortal?.target_x ?? 12.0);
+    const portalTy = Number(resolvedPortal?.target_y ?? 18.0);
+    const portalFwd = Number(resolvedPortal?.door_offset_fwd ?? defaultPortalFwd);
+    const portalReqItem = resolvedPortal?.required_item || "";
+    const portalReqFlag = resolvedPortal?.required_flag || "";
+    const portalLockedText = resolvedPortal?.locked_text || "";
+
+    const worldOptionsHtml = `<option value="">（請選擇目標世界）</option>` +
+      (this.app.worlds || [])
+        .map((w) => {
+          const selected = portalTargetId
+            ? w.world_id === portalTargetId
+            : resolvedPortal?.target_world_file === w.file_name;
+          return `<option value="${escapeHtml(w.world_id)}" data-file="${escapeHtml(w.file_name)}" ${selected ? "selected" : ""}>${escapeHtml(w.name)} (${w.width}×${w.height})</option>`;
+        })
+        .join("");
+
+    const portalCardHtml = `
+      <div class="prop-card">
+        <div class="row-gap space-between">
+          <strong>🚪 建築物出入口（門）設定</strong>
+          <label class="inline-field">
+            <input id="insPortalEnable" type="checkbox" ${portalEnabled ? "checked" : ""} />
+            <span>啟用門傳送</span>
+          </label>
+        </div>
+
+        <div style="background:rgba(37,99,235,0.12);border:1px solid rgba(96,165,250,0.35);border-radius:7px;padding:7px 8px;display:flex;flex-direction:column;gap:5px;">
+          <strong style="font-size:11px;color:#93c5fd;">✨ 一鍵建立並連結全新室內世界（自動放回程門）</strong>
+          <div class="row-gap">
+            <select id="insQuickIntTheme" class="ctrl-select ctrl-compact" style="flex:1;">
+              <option value="shop_interior">🏪 精品商店內部</option>
+              <option value="home_interior">🛋️ 溫馨住家內部</option>
+              <option value="palace_interior">👑 皇家宮殿內部</option>
+              <option value="classroom_interior">🏫 活力教室內部</option>
+              <option value="office_interior">💼 科技辦公室內部</option>
+              <option value="factory_interior">🏭 自動化工廠內部</option>
+              <option value="blank">🌿 空白室內空間</option>
+            </select>
+            <input id="insQuickIntName" class="ctrl-input" style="flex:1;" placeholder="室內世界名稱（選填）" value="${escapeHtml(entity.name)} 內部" />
+          </div>
+          <button id="btnInsQuickLinkInt" class="btn btn-primary" style="width:100%;">✨ 一鍵建立室內世界並建立雙向門</button>
+        </div>
+
+        ${portalEnabled ? `
+          <div class="prop-row">
+            <label>門的類型</label>
+            <select id="insPortalKind" class="ctrl-select" style="flex:1;">
+              <option value="enter" ${portalKind === "enter" ? "selected" : ""}>🚪 進入目標世界 (Enter)</option>
+              <option value="exit" ${portalKind === "exit" ? "selected" : ""}>🔙 離開返回原世界 (Exit)</option>
+            </select>
+          </div>
+          <div class="prop-row">
+            <label>門牌提示</label>
+            <input id="insPortalLabel" class="ctrl-input" style="flex:1;" value="${escapeHtml(portalLabel)}" />
+          </div>
+          <div class="prop-row">
+            <label>目標世界</label>
+            <select id="insPortalTargetWorld" class="ctrl-select" style="flex:1;">${worldOptionsHtml}</select>
+          </div>
+          <div class="prop-row">
+            <label>落點座標</label>
+            <div class="row-gap" style="flex:1;">
+              <input id="insPortalTx" type="number" step="0.5" class="ctrl-input" style="width:68px;" value="${portalTx.toFixed(1)}" />
+              <input id="insPortalTy" type="number" step="0.5" class="ctrl-input" style="width:68px;" value="${portalTy.toFixed(1)}" />
+              <span class="hint-text">門前距</span>
+              <input id="insPortalFwd" type="number" step="0.1" min="0" max="4" class="ctrl-input" style="width:54px;" value="${portalFwd.toFixed(2)}" />
+            </div>
+          </div>
+          <div class="prop-row">
+            <label>開門條件</label>
+            <div class="row-gap" style="flex:1;">
+              <input id="insPortalReqItem" class="ctrl-input" style="flex:1;" placeholder="所需道具（選填）" value="${escapeHtml(portalReqItem)}" />
+              <input id="insPortalReqFlag" class="ctrl-input" style="flex:1;" placeholder="所需旗標（選填）" value="${escapeHtml(portalReqFlag)}" />
+            </div>
+          </div>
+          <div class="prop-row">
+            <label>上鎖提示</label>
+            <input id="insPortalLockedText" class="ctrl-input" style="flex:1;" placeholder="未解鎖時顯示之對話（選填）" value="${escapeHtml(portalLockedText)}" />
+          </div>
+          <div class="row-gap">
+            <button id="btnInsPortalSave" class="btn btn-primary" style="flex:1;">💾 儲存門設定</button>
+            <button id="btnInsPortalEnterNow" class="btn btn-gold" style="flex:1;">🚪 立即進門前往</button>
+          </div>
+        ` : `<div class="hint-text">勾選「啟用門傳送」或點擊上方一鍵按鈕，即可讓玩家按 F 或點擊此物件進入另一個世界探索！</div>`}
+      </div>`;
 
     container.innerHTML = `
       <div class="prop-card">
@@ -415,6 +568,8 @@ export class ToolController {
         </div>
       </div>
 
+      ${vehCardHtml}
+      ${portalCardHtml}
       <div id="insQuestWrap"></div>`;
 
     const patch = (fields) => this.app.updateEntityFields(entity.id, fields);
@@ -662,6 +817,151 @@ export class ToolController {
         this.app.renderRightPanel();
         this.app.showToast(`已帶入「${entity.name}」，可調整動作並儲存規則！`);
       });
+    });
+
+    // 交通工具搭乘設定事件綁定
+    const syncMountedIfCurrent = () => {
+      if (this.app.sim.player.mountedEntityId === entity.id) {
+        const nextCfg = this.app.sim.getVehicleConfig(entity);
+        if (!nextCfg) {
+          this.app.sim.dismountPlayer(true);
+        } else {
+          this.app.sim.player.mountConfig = nextCfg;
+          if (nextCfg.mode === "passenger") this.app.sim.player.mountControlMode = "passenger";
+          else if (nextCfg.mode === "drive") this.app.sim.player.mountControlMode = "drive";
+          this.app.sim._syncMountedPlayer(0);
+          this.app.sim.onUiSync?.("mount", this.app.sim.getMountedState());
+        }
+      }
+    };
+
+    const readVehForm = () => {
+      const mode = container.querySelector("#insVehMode")?.value || "drive";
+      const seatStyle = container.querySelector("#insVehSeatStyle")?.value || "ride_on";
+      const speedMul = Number(container.querySelector("#insVehSpeed")?.value ?? vehSpeedMul);
+      const seatZ = Number(container.querySelector("#insVehSeatZ")?.value ?? vehSeatZ);
+      const seatFwd = Number(container.querySelector("#insVehSeatFwd")?.value ?? vehSeatFwd);
+      return {
+        rideable: true,
+        mode,
+        seat_style: seatStyle,
+        speed_mul: Number(speedMul.toFixed(2)),
+        seat_z: Number(seatZ.toFixed(2)),
+        seat_forward: Number(seatFwd.toFixed(2)),
+      };
+    };
+
+    const saveVehCfg = async (cfgObj, rerender = false) => {
+      const nextMeta = buildEntityMetaWithVehicle(entity, cfgObj);
+      entity.meta_json = nextMeta;
+      await patch({ meta_json: nextMeta });
+      syncMountedIfCurrent();
+      if (rerender) this.renderInspector(container, entity);
+    };
+
+    container.querySelector("#insVehEnable")?.addEventListener("change", async (e) => {
+      if (e.target.checked) {
+        await saveVehCfg({
+          rideable: true,
+          mode: vehMode,
+          seat_style: vehSeatStyle,
+          speed_mul: Number(vehSpeedMul.toFixed(2)),
+          seat_z: Number(vehSeatZ.toFixed(2)),
+          seat_forward: Number(vehSeatFwd.toFixed(2)),
+        }, true);
+        this.app.showToast(`已啟用「${entity.name}」的搭乘功能（按 G 搭乘）！`);
+      } else {
+        await saveVehCfg({ rideable: false }, true);
+        this.app.showToast(`已停用「${entity.name}」的搭乘功能`);
+      }
+    });
+
+    container.querySelector("#insVehMode")?.addEventListener("change", () => saveVehCfg(readVehForm(), false));
+    container.querySelector("#insVehSeatStyle")?.addEventListener("change", () => saveVehCfg(readVehForm(), true));
+
+    const bindVehRange = (inputId, valId, suffix = "") => {
+      const inp = container.querySelector(inputId);
+      const valEl = container.querySelector(valId);
+      if (!inp) return;
+      inp.addEventListener("input", () => {
+        if (valEl) valEl.textContent = `${Number(inp.value).toFixed(2)}${suffix}`;
+      });
+      inp.addEventListener("change", () => saveVehCfg(readVehForm(), false));
+    };
+    bindVehRange("#insVehSpeed", "#insVehSpeedVal", "x");
+    bindVehRange("#insVehSeatZ", "#insVehSeatZVal");
+    bindVehRange("#insVehSeatFwd", "#insVehSeatFwdVal");
+
+    // 建築物出入口（門）設定事件綁定
+    const readPortalForm = () => {
+      const sel = container.querySelector("#insPortalTargetWorld");
+      const opt = sel?.options?.[sel.selectedIndex];
+      const targetWorldId = sel?.value || "";
+      const targetWorldFile = opt?.dataset?.file || resolvedPortal?.target_world_file || "";
+      return {
+        enabled: true,
+        kind: container.querySelector("#insPortalKind")?.value || "enter",
+        label: container.querySelector("#insPortalLabel")?.value.trim() || `進入「${entity.name}」`,
+        target_world_id: targetWorldId,
+        target_world_file: targetWorldFile,
+        target_x: Number(container.querySelector("#insPortalTx")?.value ?? portalTx),
+        target_y: Number(container.querySelector("#insPortalTy")?.value ?? portalTy),
+        target_yaw: resolvedPortal?.target_yaw ?? 180,
+        target_portal_id: resolvedPortal?.target_portal_id || "",
+        door_offset_fwd: Number(container.querySelector("#insPortalFwd")?.value ?? portalFwd),
+        required_item: container.querySelector("#insPortalReqItem")?.value.trim() || "",
+        required_flag: container.querySelector("#insPortalReqFlag")?.value.trim() || "",
+        locked_text: container.querySelector("#insPortalLockedText")?.value.trim() || "",
+      };
+    };
+
+    const savePortalCfg = async (portalObj, rerender = false) => {
+      const nextMeta = buildEntityMetaWithPortal(entity, portalObj);
+      entity.meta_json = nextMeta;
+      await patch({ meta_json: nextMeta });
+      if (rerender) this.renderInspector(container, entity);
+    };
+
+    container.querySelector("#insPortalEnable")?.addEventListener("change", async (e) => {
+      if (e.target.checked) {
+        const firstWorld = (this.app.worlds || []).find((w) => w.file_name !== this.app.currentWorldFile) || (this.app.worlds || [])[0];
+        await savePortalCfg({
+          enabled: true,
+          kind: portalKind,
+          label: portalLabel,
+          target_world_id: portalTargetId || firstWorld?.world_id || "",
+          target_world_file: resolvedPortal?.target_world_file || firstWorld?.file_name || "",
+          target_x: portalTx,
+          target_y: portalTy,
+          target_yaw: 180,
+          target_portal_id: resolvedPortal?.target_portal_id || "",
+          door_offset_fwd: portalFwd,
+          required_item: portalReqItem,
+          required_flag: portalReqFlag,
+          locked_text: portalLockedText,
+        }, true);
+        this.app.showToast(`已啟用「${entity.name}」的門傳送功能！`);
+      } else {
+        await savePortalCfg(null, true);
+        this.app.showToast(`已停用「${entity.name}」的門傳送功能`);
+      }
+    });
+
+    container.querySelector("#btnInsQuickLinkInt")?.addEventListener("click", async () => {
+      const theme = container.querySelector("#insQuickIntTheme")?.value || "shop_interior";
+      const name = container.querySelector("#insQuickIntName")?.value.trim() || `${entity.name} 內部`;
+      await this.app.quickLinkInteriorWorld(entity, theme, name);
+    });
+
+    container.querySelector("#btnInsPortalSave")?.addEventListener("click", async () => {
+      await savePortalCfg(readPortalForm(), false);
+      this.app.showToast(`已儲存「${entity.name}」的門傳送設定！`);
+    });
+
+    container.querySelector("#btnInsPortalEnterNow")?.addEventListener("click", async () => {
+      const cfg = readPortalForm();
+      await savePortalCfg(cfg, false);
+      await this.app.handlePortalTransition(entity, cfg);
     });
 
     // 內嵌「任務角色／互動考驗」編輯器

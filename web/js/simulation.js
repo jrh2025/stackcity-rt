@@ -8,6 +8,66 @@ import { soundEngine } from "./audio.js";
 
 const PX_TO_WORLD = 1.0 / 26.0;
 
+/// 安全解析實體 meta_json 中的交通工具搭乘設定
+export function parseEntityVehicle(entity) {
+  if (!entity || !entity.meta_json) return null;
+  try {
+    const root = typeof entity.meta_json === "string" ? JSON.parse(entity.meta_json) : entity.meta_json;
+    const veh = root && typeof root === "object" ? root.vehicle : null;
+    if (!veh || typeof veh !== "object") return null;
+    return veh;
+  } catch {
+    return null;
+  }
+}
+
+/// 將更新後的 vehicle 設定寫回實體的 meta_json（完整保留 interaction 等既有欄位）
+export function buildEntityMetaWithVehicle(entity, vehicleCfg) {
+  let root = {};
+  try {
+    const parsed = typeof entity?.meta_json === "string" ? JSON.parse(entity.meta_json || "{}") : {};
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) root = parsed;
+  } catch {
+    root = {};
+  }
+  if (!vehicleCfg) {
+    delete root.vehicle;
+  } else {
+    root.vehicle = vehicleCfg;
+  }
+  return JSON.stringify(root);
+}
+
+/// 安全解析實體 meta_json 中的「門 (`portal`)」跨世界傳送設定（未啟用則回傳 null）
+export function parseEntityPortal(entity) {
+  if (!entity || !entity.meta_json) return null;
+  try {
+    const root = typeof entity.meta_json === "string" ? JSON.parse(entity.meta_json) : entity.meta_json;
+    const portal = root && typeof root === "object" ? root.portal : null;
+    if (!portal || typeof portal !== "object" || !portal.enabled) return null;
+    return portal;
+  } catch {
+    return null;
+  }
+}
+
+/// 將更新後的「門 (`portal`)」設定寫回實體的 meta_json（完整保留 interaction 與 vehicle 等既有欄位）
+export function buildEntityMetaWithPortal(entity, portalCfg) {
+  let root = {};
+  try {
+    const parsed = typeof entity?.meta_json === "string" ? JSON.parse(entity.meta_json || "{}") : {};
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) root = parsed;
+  } catch {
+    root = {};
+  }
+  if (!portalCfg || !portalCfg.enabled) {
+    delete root.portal;
+  } else {
+    root.portal = portalCfg;
+  }
+  return JSON.stringify(root);
+}
+
 export class WorldSimulation {
   constructor(renderer, onUiSync) {
     this.renderer = renderer;
@@ -26,10 +86,12 @@ export class WorldSimulation {
     this.wanderZones = [];
     this.events = [];
 
-    // 任務關卡與互動系統回呼（由 main.js 掛接 QuestManager）
+    // 任務關卡、跨世界門與互動系統回呼（由 main.js / standalone_bootstrap.js 掛接）
     this.onEntityQuestInteract = null;
     this.onProximityCheck = null;
     this.getQuestBadge = null;
+    this.onPortalTrigger = null;
+    this.checkPortalLock = null;
 
     // 玩家專屬可控 3D 化身物理狀態（z 為相對於地面高度之離地高度）
     this.player = {
@@ -54,8 +116,15 @@ export class WorldSimulation {
       _tweenMul: 1.0,
       moving: false,
       radius: 0.26,
+      mountedEntityId: null,
+      mountControlMode: "drive",
+      mountConfig: null,
+      playerHiddenInVehicle: false,
     };
     this.nearestToPlayer = null;
+    this.nearestRideable = null;
+    this.nearestPortal = null;
+    this._lastHornMs = 0;
 
     this.pathStates = new Map();
     this.wanderStates = new Map();
@@ -106,8 +175,16 @@ export class WorldSimulation {
     this.lastEncounterInside.clear();
     this.autoEncounterCooldowns.clear();
     this.nearestToPlayer = null;
+    this.nearestRideable = null;
+    this.nearestPortal = null;
+
+    this.player.mountedEntityId = null;
+    this.player.mountControlMode = "drive";
+    this.player.mountConfig = null;
+    this.player.playerHiddenInVehicle = false;
 
     this._initPlayerFromMeta(meta);
+    this.onUiSync?.("mount", null);
   }
 
   // ---------- 移動類型、碰撞箱與地形物理系統 ----------
@@ -305,6 +382,7 @@ export class WorldSimulation {
 
     for (const ent of this.entities) {
       if (ent.id === actorId) continue;
+      if (ent.parent_id === actorId) continue;
       if (ignoreDynamicPeers && (ent.parent_id || this._isEntityDynamic(ent.id))) continue;
       const col = this.getEntityCollider(ent);
       if (!col) continue;
@@ -324,8 +402,8 @@ export class WorldSimulation {
       }
     }
 
-    // 玩家角色本身也成為 NPC 的實體身位避讓（避免漫步 NPC 直接穿過玩家身體）
-    if (actorId !== "__player__" && this.player.visible && !ignoreDynamicPeers) {
+    // 玩家角色本身也成為 NPC 的實體身位避讓（避免漫步 NPC 直接穿過玩家身體；載具本身則略過其搭乘者）
+    if (actorId !== "__player__" && actorId !== this.player.mountedEntityId && this.player.visible && !ignoreDynamicPeers) {
       const pFoot = this.renderer.getTerrainElevationAt(this.player.x, this.player.y) + (this.player.z || 0);
       if (Math.abs(effFootZ - pFoot) < 1.1) {
         const dNext = Math.hypot(nx - this.player.x, ny - this.player.y);
@@ -460,10 +538,506 @@ export class WorldSimulation {
     this.player.scale_z = base;
   }
 
-  /// 讓玩家化身進行平面移動（上帝視角與街道漫步共同使用，徹底防落水／防穿建築家具牆體）
+  // ---------- 交通工具搭乘／駕駛／巡航系統 ----------
+
+  /// 檢查某實體是否綁有啟用中的巡航路徑
+  hasActivePathFor(entityId) {
+    return this.paths.some(
+      (p) => p.active && p.entity_id === entityId && Array.isArray(p.waypoints) && p.waypoints.length >= 2,
+    );
+  }
+
+  /// 取得實體完整的載具搭乘設定（未設定者依類型與名稱智慧推斷；明確停用 rideable:false 則回傳 null）
+  getVehicleConfig(ent) {
+    if (!ent || !ent.visible) return null;
+    const explicit = parseEntityVehicle(ent);
+    if (explicit && explicit.rideable === false) return null;
+
+    const meta = this.assetMap.get(ent.asset_id);
+    const nameStr = `${ent.name || ""} ${meta?.name || ""}`;
+    const isVehicleCat = meta?.category === "vehicle";
+    const isMountAnimal =
+      meta?.category === "animal" &&
+      /(駿馬|白馬|戰馬|馬|獨角獸|駱駝|大象|horse|pony|camel|elephant)/i.test(nameStr);
+
+    if (!explicit && !isVehicleCat && !isMountAnimal) return null;
+
+    const mobility = this.getActorMobility(meta, ent.name, ent.z || 0);
+    const hasPath = this.hasActivePathFor(ent.id);
+
+    const isInsideDefault =
+      /(巴士|公車|校車|卡車|貨車|火車|列車|電車|跑車|汽車|轎車|賽車|飛船|太空船|星艦|bus|truck|train|car|spaceship)/i.test(
+        nameStr,
+      );
+    const isCarriage = /(馬車|篷車|雙馬車|carriage|wagon|coach)/i.test(nameStr);
+    const isBoat = mobility === "water";
+    const isAir = mobility === "air";
+
+    let defaultSpeed = 1.5;
+    if (/(跑車|汽車|轎車|賽車|car|sports)/i.test(nameStr)) defaultSpeed = 1.95;
+    else if (isMountAnimal) defaultSpeed = 1.75;
+    else if (isCarriage) defaultSpeed = 1.65;
+    else if (isAir) defaultSpeed = 1.75;
+    else if (isBoat || /(巴士|公車|火車|列車|bus|train)/i.test(nameStr)) defaultSpeed = 1.55;
+
+    let defaultSeatZ = 0.52;
+    if (isBoat) defaultSeatZ = 0.42;
+    else if (isAir) defaultSeatZ = 0.24;
+    else if (isMountAnimal || isCarriage) defaultSeatZ = 0.58;
+
+    let defaultSeatFwd = 0.0;
+    if (isCarriage) defaultSeatFwd = 0.18;
+    else if (isBoat) defaultSeatFwd = -0.08;
+
+    const mode = explicit?.mode || (hasPath ? "both" : "drive");
+    const seat_style = explicit?.seat_style || (isInsideDefault ? "inside" : "ride_on");
+    const speed_mul = Number(explicit?.speed_mul ?? defaultSpeed);
+    const seat_z = Number(explicit?.seat_z ?? defaultSeatZ);
+    const seat_forward = Number(explicit?.seat_forward ?? defaultSeatFwd);
+
+    return {
+      rideable: true,
+      mode: ["drive", "passenger", "both"].includes(mode) ? mode : "drive",
+      seat_style: seat_style === "inside" ? "inside" : "ride_on",
+      speed_mul: Math.max(0.5, Math.min(4.0, Number.isFinite(speed_mul) ? speed_mul : defaultSpeed)),
+      seat_z: Math.max(-0.5, Math.min(3.0, Number.isFinite(seat_z) ? seat_z : defaultSeatZ)),
+      seat_forward: Math.max(-1.5, Math.min(1.5, Number.isFinite(seat_forward) ? seat_forward : defaultSeatFwd)),
+      mobility,
+      hasPath,
+      isExplicit: Boolean(explicit),
+    };
+  }
+
+  /// 尋找玩家身旁最近且可搭乘的交通工具或坐騎
+  findNearestRideable() {
+    if (!this.player.visible) return null;
+    let best = null;
+    let bestDist = Infinity;
+    for (const ent of this.entities) {
+      if (!ent.visible) continue;
+      const cfg = this.getVehicleConfig(ent);
+      if (!cfg) continue;
+      if (cfg.mobility === "air" && (ent.z || 0) > 3.2) continue;
+      const maxDist = cfg.mobility === "land" ? 2.9 : 3.9;
+      const d = Math.hypot(ent.x - this.player.x, ent.y - this.player.y);
+      if (d <= maxDist && d < bestDist) {
+        bestDist = d;
+        best = { entity: ent, config: cfg, dist: d };
+      }
+    }
+    return best;
+  }
+
+  /// 取得目前玩家搭乘狀態摘要（供 UI 橫幅與渲染器顯示）
+  getMountedState() {
+    const pl = this.player;
+    if (!pl.mountedEntityId) return null;
+    const veh = this.entities.find((e) => e.id === pl.mountedEntityId);
+    if (!veh) return null;
+    const cfg = pl.mountConfig || this.getVehicleConfig(veh);
+    const meta = this.assetMap.get(veh.asset_id);
+    return {
+      entity: veh,
+      config: cfg,
+      controlMode: pl.mountControlMode,
+      canSwitchMode: Boolean(cfg && cfg.mode === "both" && this.hasActivePathFor(veh.id)),
+      category: meta?.category || "vehicle",
+    };
+  }
+
+  _getMountIcon(ent, cfg) {
+    const s = `${ent?.name || ""} ${this.assetMap.get(ent?.asset_id)?.name || ""}`;
+    if (cfg?.mobility === "water" || /(船|艇|boat|ship)/i.test(s)) return "⛵";
+    if (cfg?.mobility === "air" || /(熱氣球|氣球|飛船|太空船|balloon|spaceship)/i.test(s)) return "🎈";
+    if (/(馬車|篷車|carriage|wagon)/i.test(s)) return "🐴";
+    if (/(馬|horse|pony)/i.test(s)) return "🐎";
+    if (/(火車|列車|train)/i.test(s)) return "🚂";
+    if (/(巴士|公車|bus)/i.test(s)) return "🚌";
+    return "🚗";
+  }
+
+  /// 讓玩家搭乘指定載具／坐騎
+  mountEntity(entityId, preferredControl = null) {
+    const pl = this.player;
+    if (!pl.visible) return { ok: false, reason: "player_hidden" };
+    const ent = this.entities.find((e) => e.id === entityId && e.visible);
+    if (!ent) return { ok: false, reason: "not_found" };
+    const cfg = this.getVehicleConfig(ent);
+    if (!cfg) return { ok: false, reason: "not_rideable" };
+
+    if (pl.mountedEntityId && pl.mountedEntityId !== entityId) {
+      this.dismountPlayer(true);
+    }
+
+    let controlMode = "drive";
+    if (cfg.mode === "passenger") {
+      controlMode = "passenger";
+    } else if (cfg.mode === "both") {
+      if (preferredControl === "drive" || preferredControl === "passenger") {
+        controlMode = preferredControl;
+      } else {
+        controlMode = cfg.hasPath ? "passenger" : "drive";
+      }
+    }
+    if (controlMode === "passenger" && !cfg.hasPath && cfg.mode === "both") {
+      controlMode = "drive";
+    }
+
+    if (ent._origAnimMode === undefined) {
+      ent._origAnimMode = ent.anim_mode || "auto";
+    }
+    ent._jumpZ = 0;
+    ent._jumpVelZ = 0;
+    ent._mountBaseZ = ent.z || 0;
+
+    pl.mountedEntityId = ent.id;
+    pl.mountControlMode = controlMode;
+    pl.mountConfig = cfg;
+    pl.playerHiddenInVehicle = cfg.seat_style === "inside";
+    pl.velZ = 0;
+    pl.moving = false;
+
+    this._syncMountedPlayer(0);
+
+    const gz = this.renderer.getTerrainElevationAt(ent.x, ent.y) + (ent.z || 0);
+    if (cfg.mobility === "water") soundEngine.play("chime");
+    else if (this.assetMap.get(ent.asset_id)?.category === "vehicle") soundEngine.play("horn");
+    else soundEngine.play("mount");
+
+    this.renderer.spawnParticles("sparkle", ent.x, ent.y, gz + 1.0, 14);
+    const bubbleMsg = controlMode === "passenger"
+      ? `乘上「${ent.name}」自動巡航中！`
+      : `開始駕馭「${ent.name}」！`;
+    this.renderer.addSpeechBubble("__player__", pl.x, pl.y, gz, bubbleMsg, 2.5);
+    this.onUiSync?.("mount", this.getMountedState());
+    return { ok: true, vehicle: ent, controlMode };
+  }
+
+  /// 依載具座標／朝向／座位參數同步玩家位置（含騎乘跳躍重力與座標平滑）
+  _syncMountedPlayer(dt = 0) {
+    const pl = this.player;
+    if (!pl.mountedEntityId) return;
+    const veh = this.entities.find((e) => e.id === pl.mountedEntityId && e.visible);
+    if (!veh) {
+      this.dismountPlayer(true);
+      return;
+    }
+
+    const cfg = pl.mountConfig || this.getVehicleConfig(veh);
+    if (!cfg) {
+      this.dismountPlayer(true);
+      return;
+    }
+
+    // 處理騎乘動物跳躍物理
+    if (dt > 0 && ((veh._jumpZ || 0) > 0.001 || Math.abs(veh._jumpVelZ || 0) > 0.001)) {
+      const baseZ = veh._mountBaseZ ?? 0;
+      const prevVel = veh._jumpVelZ || 0;
+      veh._jumpVelZ = prevVel - 14.5 * dt;
+      veh._jumpZ = (veh._jumpZ || 0) + veh._jumpVelZ * dt;
+      if (veh._jumpZ <= 0) {
+        if (prevVel < -2.2) {
+          const gz = this.renderer.getTerrainElevationAt(veh.x, veh.y);
+          this.renderer.spawnParticles("smoke", veh.x, veh.y, gz + 0.12, 6);
+        }
+        veh._jumpZ = 0;
+        veh._jumpVelZ = 0;
+      }
+      veh.z = baseZ + veh._jumpZ;
+    }
+
+    const sy = veh.scale_y > 0.01 ? veh.scale_y : (veh.scale || 1.0);
+    const sz = veh.scale_z > 0.01 ? veh.scale_z : (veh.scale || 1.0);
+    const yawRad = ((veh.yaw || 0) * Math.PI) / 180;
+    const fwdWorld = cfg.seat_style === "inside" ? 0 : (cfg.seat_forward || 0) * sy;
+
+    const px = veh.x + (-Math.sin(yawRad)) * fwdWorld;
+    const py = veh.y + Math.cos(yawRad) * fwdWorld;
+
+    const vehGround = this.renderer.getTerrainElevationAt(veh.x, veh.y);
+    const plGround = this.renderer.getTerrainElevationAt(px, py);
+    const meta = this.assetMap.get(veh.asset_id);
+    const sh = (meta?.slice_count || 36) * PX_TO_WORLD * sz;
+    const seatOffsetZ = cfg.seat_style === "inside" ? Math.max(0.55, sh * 0.45) : (cfg.seat_z ?? 0.52) * sz;
+
+    pl.x = px;
+    pl.y = py;
+    pl.z = Math.max(0, vehGround + (veh.z || 0) + seatOffsetZ - plGround);
+    pl.yaw = veh.yaw;
+    pl.velZ = 0;
+    pl.playerHiddenInVehicle = cfg.seat_style === "inside";
+    pl.anim_mode = "static";
+
+    this.renderer.camera.walkPos = [pl.x, pl.y, plGround + pl.z];
+  }
+
+  /// 讓玩家安全下車／下馬／下船（自動尋找合法陸地或橋面落點）
+  dismountPlayer(force = false) {
+    const pl = this.player;
+    if (!pl.mountedEntityId) return { ok: false, reason: "not_mounted" };
+
+    const veh = this.entities.find((e) => e.id === pl.mountedEntityId);
+    const cfg = pl.mountConfig || (veh ? this.getVehicleConfig(veh) : null);
+
+    let safeX = pl.x;
+    let safeY = pl.y;
+    let foundShore = false;
+
+    if (veh && cfg) {
+      if (cfg.mobility === "water") {
+        // 從水域向外搜尋最近的合法陸地或橋面碼頭
+        outerWater: for (const r of [1.0, 1.5, 2.0, 2.6, 3.2, 3.8]) {
+          for (let i = 0; i < 16; i++) {
+            const ang = (i / 16) * Math.PI * 2;
+            const cx = veh.x + Math.cos(ang) * r;
+            const cy = veh.y + Math.sin(ang) * r;
+            if (this.canStandAt("__player__", "land", cx, cy, null, 0.30)) {
+              safeX = cx;
+              safeY = cy;
+              foundShore = true;
+              break outerWater;
+            }
+          }
+        }
+        if (!foundShore && !force) {
+          soundEngine.play("interact");
+          const gz = this.renderer.getTerrainElevationAt(veh.x, veh.y);
+          this.renderer.addSpeechBubble("__player__", veh.x, veh.y, gz + 0.5, "附近都是水域，請靠近岸邊或木橋再按 G 下船！", 2.8);
+          return { ok: false, reason: "water_no_shore" };
+        }
+      } else if (cfg.mobility === "air") {
+        // 空中載具檢查正下方或半徑 3.5 格內是否有安全陸地可降落
+        if (this.canStandAt("__player__", "land", veh.x, veh.y, null, 0.30)) {
+          safeX = veh.x;
+          safeY = veh.y;
+          foundShore = true;
+        } else {
+          outerAir: for (const r of [0.9, 1.5, 2.2, 3.0, 3.5]) {
+            for (let i = 0; i < 12; i++) {
+              const ang = (i / 12) * Math.PI * 2;
+              const cx = veh.x + Math.cos(ang) * r;
+              const cy = veh.y + Math.sin(ang) * r;
+              if (this.canStandAt("__player__", "land", cx, cy, null, 0.30)) {
+                safeX = cx;
+                safeY = cy;
+                foundShore = true;
+                break outerAir;
+              }
+            }
+          }
+        }
+        if (!foundShore && !force) {
+          soundEngine.play("interact");
+          const gz = this.renderer.getTerrainElevationAt(veh.x, veh.y);
+          this.renderer.addSpeechBubble("__player__", pl.x, pl.y, gz + (veh.z || 0), "下方是水域或障礙，請飛到陸地上空再按 G 降落！", 2.8);
+          return { ok: false, reason: "air_no_land" };
+        }
+        if (pl.mountControlMode === "drive" && (veh.z || 0) > 0.3) {
+          veh.z = 0;
+          veh._mountBaseZ = 0;
+        }
+      } else {
+        // 陸地載具／馬匹優先停在車側右／左／後／前
+        const yawRad = ((veh.yaw || 0) * Math.PI) / 180;
+        const rx = Math.cos(yawRad);
+        const ry = Math.sin(yawRad);
+        const fx = -Math.sin(yawRad);
+        const fy = Math.cos(yawRad);
+        const dirs = [
+          [rx, ry],
+          [-rx, -ry],
+          [-fx, -fy],
+          [fx, fy],
+        ];
+        let placed = false;
+        for (const dist of [0.95, 1.35]) {
+          for (const [dx, dy] of dirs) {
+            const cx = veh.x + dx * dist;
+            const cy = veh.y + dy * dist;
+            if (this.canStandAt("__player__", "land", cx, cy, null, 0.28)) {
+              safeX = cx;
+              safeY = cy;
+              placed = true;
+              break;
+            }
+          }
+          if (placed) break;
+        }
+        if (!placed) {
+          const [fx2, fy2] = this._findSafeLandPoint(veh.x, veh.y, false);
+          safeX = fx2;
+          safeY = fy2;
+        }
+      }
+
+      if (veh._jumpZ) {
+        veh.z = veh._mountBaseZ ?? 0;
+        veh._jumpZ = 0;
+        veh._jumpVelZ = 0;
+      }
+      if (veh._origAnimMode !== undefined) {
+        veh.anim_mode = veh._origAnimMode;
+        delete veh._origAnimMode;
+      }
+    } else if (force) {
+      const [fx2, fy2] = this._findSafeLandPoint(pl.x, pl.y, false);
+      safeX = fx2;
+      safeY = fy2;
+    }
+
+    pl.mountedEntityId = null;
+    pl.mountControlMode = "drive";
+    pl.mountConfig = null;
+    pl.playerHiddenInVehicle = false;
+    pl.x = safeX;
+    pl.y = safeY;
+    pl.z = 0;
+    pl.velZ = 0;
+    pl.moving = false;
+    pl.anim_mode = "static";
+
+    const gz = this.renderer.getTerrainElevationAt(pl.x, pl.y);
+    this.renderer.camera.walkPos = [pl.x, pl.y, gz];
+    soundEngine.play("dismount");
+    this.onUiSync?.("mount", null);
+    return { ok: true, vehicle: veh || null };
+  }
+
+  /// 熱鍵 G：若已搭乘則下車；否則搭乘身旁最近載具
+  toggleMountNearest() {
+    if (this.player.mountedEntityId) {
+      return this.dismountPlayer(false);
+    }
+    const found = this.findNearestRideable();
+    if (!found) {
+      const gz = this.renderer.getTerrainElevationAt(this.player.x, this.player.y);
+      this.renderer.addSpeechBubble(
+        "__player__",
+        this.player.x,
+        this.player.y,
+        gz,
+        "靠近汽車、船、馬或馬車再按 G 就可以搭乘喔！",
+        2.3,
+      );
+      return { ok: false, reason: "none_nearby" };
+    }
+    return this.mountEntity(found.entity.id);
+  }
+
+  /// 熱鍵 Tab：在「親自駕駛」與「自動巡航乘客」間切換（需載具支援 both 且綁有啟用路徑）
+  toggleMountControlMode() {
+    const pl = this.player;
+    if (!pl.mountedEntityId) return { ok: false, reason: "not_mounted" };
+    const veh = this.entities.find((e) => e.id === pl.mountedEntityId);
+    const cfg = pl.mountConfig || (veh ? this.getVehicleConfig(veh) : null);
+    if (!veh || !cfg || cfg.mode !== "both") {
+      return { ok: false, reason: "mode_locked" };
+    }
+    const nextMode = pl.mountControlMode === "drive" ? "passenger" : "drive";
+    if (nextMode === "passenger" && !this.hasActivePathFor(veh.id)) {
+      const gz = this.renderer.getTerrainElevationAt(veh.x, veh.y) + (veh.z || 0);
+      this.renderer.addSpeechBubble("__player__", pl.x, pl.y, gz, "此載具沒有設定巡航路徑，維持親自駕駛！", 2.4);
+      return { ok: false, reason: "no_path" };
+    }
+    pl.mountControlMode = nextMode;
+    soundEngine.play("mount");
+    const gz = this.renderer.getTerrainElevationAt(veh.x, veh.y) + (veh.z || 0);
+    this.renderer.addSpeechBubble(
+      "__player__",
+      pl.x,
+      pl.y,
+      gz,
+      nextMode === "passenger" ? "已切換為「自動巡航乘客」" : "已接手「親自駕駛」方向盤！",
+      2.2,
+    );
+    this.onUiSync?.("mount", this.getMountedState());
+    return { ok: true, controlMode: nextMode };
+  }
+
+  /// 駕駛飛行載具時微調離地高度（dir: +1 上升 / -1 下降）
+  adjustMountedAltitude(dir, dt) {
+    const pl = this.player;
+    if (!pl.mountedEntityId || pl.mountControlMode !== "drive") return false;
+    if (pl.mountConfig?.mobility !== "air") return false;
+    const veh = this.entities.find((e) => e.id === pl.mountedEntityId && e.visible);
+    if (!veh) return false;
+    veh.z = Math.max(0.25, Math.min(10.0, (veh.z || 0) + dir * 4.2 * dt));
+    veh._mountBaseZ = veh.z;
+    this._syncMountedPlayer(0);
+    return true;
+  }
+
+  /// 讓玩家化身進行平面移動（上帝視角與街道漫步共同使用，徹底防落水／防穿建築家具牆體；搭乘時改由載具承接控制）
   movePlayerBy(dx, dy, dt) {
     const pl = this.player;
     if (!pl.visible) return false;
+
+    // 搭乘交通工具中
+    if (pl.mountedEntityId) {
+      const veh = this.entities.find((e) => e.id === pl.mountedEntityId && e.visible);
+      if (!veh) {
+        this.dismountPlayer(true);
+        return false;
+      }
+      if (pl.mountControlMode === "passenger") {
+        pl.moving = false;
+        return false;
+      }
+
+      const cfg = pl.mountConfig || this.getVehicleConfig(veh);
+      const vehMeta = this.assetMap.get(veh.asset_id);
+      const mobility = cfg?.mobility || this.getActorMobility(vehMeta, veh.name, veh.z || 0);
+      const mul = cfg?.speed_mul || 1.6;
+      const mdx = dx * mul;
+      const mdy = dy * mul;
+
+      let moved = false;
+      if (mobility === "air") {
+        const w = this.renderer.worldWidth || 40;
+        const h = this.renderer.worldHeight || 40;
+        const nx = Math.max(0.6, Math.min(w - 0.6, veh.x + mdx));
+        const ny = Math.max(0.6, Math.min(h - 0.6, veh.y + mdy));
+        moved = Math.hypot(nx - veh.x, ny - veh.y) > 0.0015;
+        veh.x = nx;
+        veh.y = ny;
+        if ((veh.z || 0) < 0.35) {
+          veh.z = 0.55;
+          veh._mountBaseZ = veh.z;
+        }
+      } else {
+        const vehCol = this.getEntityCollider(veh);
+        const vehRadius = vehCol ? Math.max(0.30, Math.min(0.62, Math.min(vehCol.hx, vehCol.hy))) : 0.34;
+        const curGround = this.renderer.getTerrainElevationAt(veh.x, veh.y);
+        const footZ = curGround + (veh.z || 0);
+        const res = this.tryMoveActor(veh.id, mobility, veh.x, veh.y, footZ, mdx, mdy, vehRadius, false);
+        moved = Math.hypot(res.x - veh.x, res.y - veh.y) > 0.0015;
+        veh.x = res.x;
+        veh.y = res.y;
+      }
+
+      const turnSpeed = vehMeta?.category === "animal" ? 11.0 : 8.5;
+      if (Math.hypot(mdx, mdy) > 0.001) {
+        const targetYaw = (Math.atan2(-mdx, mdy) * 180) / Math.PI;
+        veh.yaw = lerpAngleDeg(veh.yaw, targetYaw, Math.min(1, dt * turnSpeed));
+      }
+
+      if (moved) {
+        if (vehMeta?.category === "animal") veh.anim_mode = "walk";
+        else if (mobility !== "air") veh.anim_mode = "bob";
+        pl.moving = true;
+        if (Math.random() < 0.22) {
+          const gz = this.renderer.getTerrainElevationAt(veh.x, veh.y);
+          this.renderer.spawnParticles(mobility === "water" ? "sparkle" : "smoke", veh.x, veh.y, gz + 0.12, 2);
+        }
+        this._syncMountedPlayer(0);
+        return true;
+      }
+
+      pl.moving = false;
+      this._syncMountedPlayer(0);
+      return false;
+    }
+
     const curGround = this.renderer.getTerrainElevationAt(pl.x, pl.y);
     const footZ = curGround + (pl.z || 0);
 
@@ -496,7 +1070,30 @@ export class WorldSimulation {
 
   jumpPlayer() {
     const pl = this.player;
-    if (!pl.visible || pl.z > 0.05 || Math.abs(pl.velZ) > 0.05) return false;
+    if (!pl.visible) return false;
+    if (pl.mountedEntityId) {
+      if (pl.mountControlMode === "passenger" || pl.mountConfig?.mobility === "air") return false;
+      const veh = this.entities.find((e) => e.id === pl.mountedEntityId && e.visible);
+      if (!veh) return false;
+      const meta = this.assetMap.get(veh.asset_id);
+      if (meta?.category === "animal") {
+        if ((veh._jumpZ || 0) > 0.05 || Math.abs(veh._jumpVelZ || 0) > 0.05) return false;
+        veh._mountBaseZ = veh.z || 0;
+        veh._jumpVelZ = 5.4;
+        soundEngine.play("jump");
+        return true;
+      }
+      // 車輛或船隻按空白鍵鳴笛提示
+      const now = performance.now();
+      if (now - this._lastHornMs > 800) {
+        this._lastHornMs = now;
+        soundEngine.play("horn");
+        const gz = this.renderer.getTerrainElevationAt(veh.x, veh.y) + (veh.z || 0);
+        this.renderer.addSpeechBubble(veh.id, veh.x, veh.y, gz, "嘟嘟！", 1.2);
+      }
+      return true;
+    }
+    if (pl.z > 0.05 || Math.abs(pl.velZ) > 0.05) return false;
     pl.velZ = 5.2;
     soundEngine.play("jump");
     return true;
@@ -505,6 +1102,7 @@ export class WorldSimulation {
   _stepPlayerPhysics(dt) {
     const pl = this.player;
     if (!pl.visible) return;
+    if (pl.mountedEntityId) return;
     const ground = this.renderer.getTerrainElevationAt(pl.x, pl.y);
     let worldZ = ground + (pl.z || 0);
 
@@ -550,11 +1148,12 @@ export class WorldSimulation {
     // 追蹤目前具有動態位移能力的物件 ID（供自動相遇檢測使用）
     const movingIds = new Set();
 
-    // 1. 路徑巡航（亦遵循地形水陸與建築靜態阻擋檢查）
+    // 1. 路徑巡航（亦遵循地形水陸與建築靜態阻擋檢查；玩家親自駕駛時暫停自動巡航）
     for (const p of this.paths) {
       if (!p.active || !p.entity_id || !p.waypoints || p.waypoints.length < 2) continue;
       const ent = this.entities.find((e) => e.id === p.entity_id);
       if (!ent) continue;
+      if (ent.id === this.player.mountedEntityId && this.player.mountControlMode === "drive") continue;
       movingIds.add(ent.id);
 
       let st = this.pathStates.get(p.id);
@@ -646,11 +1245,12 @@ export class WorldSimulation {
       }
     }
 
-    // 2. 自由漫遊避障 AI（嚴格避開水域、牆壁與建築/家具/道具/樹幹）
+    // 2. 自由漫遊避障 AI（嚴格避開水域、牆壁與建築/家具/道具/樹幹；玩家騎乘駕馭時暫停 AI）
     for (const zone of this.wanderZones) {
       for (const eid of zone.entity_ids || []) {
         const ent = this.entities.find((e) => e.id === eid);
         if (!ent) continue;
+        if (ent.id === this.player.mountedEntityId && this.player.mountControlMode === "drive") continue;
         movingIds.add(ent.id);
 
         const meta = this.assetMap.get(ent.asset_id);
@@ -734,11 +1334,26 @@ export class WorldSimulation {
       }
     }
 
-    // 追蹤玩家身邊最近的可互動物件（上帝視角與街道漫步皆適用 [F] 鍵）
+    // 玩家搭乘交通工具同步（含停下時還原坐騎靜止姿態與騎乘跳躍重力）
+    if (this.player.mountedEntityId) {
+      const mVeh = entMap.get(this.player.mountedEntityId);
+      if (mVeh && this.player.mountControlMode === "drive" && !this.player.moving) {
+        const mMeta = this.assetMap.get(mVeh.asset_id);
+        if (mMeta?.category === "animal") mVeh.anim_mode = "static";
+        else if (mVeh._origAnimMode !== undefined) mVeh.anim_mode = mVeh._origAnimMode;
+      }
+      this._syncMountedPlayer(dt);
+    }
+
+    // 追蹤玩家身邊最近的可互動物件、可搭乘載具與可進出之門（上帝視角與街道漫步皆適用 [F]/[G] 鍵）
     if (this.player.visible) {
       this.nearestToPlayer = this._findNearestToPlayer(2.8);
+      this.nearestRideable = this.player.mountedEntityId ? null : this.findNearestRideable();
+      this.nearestPortal = this.findNearestPortal(2.35);
     } else {
       this.nearestToPlayer = null;
+      this.nearestRideable = null;
+      this.nearestPortal = null;
     }
 
     // 執行自訂事件規則（時鐘、週期、接近、日夜、兩物件相遇）
@@ -779,7 +1394,7 @@ export class WorldSimulation {
     let best = null;
     let bestD = maxDist;
     for (const ent of this.entities) {
-      if (!ent.visible) continue;
+      if (!ent.visible || ent.id === this.player.mountedEntityId) continue;
       const d = Math.hypot(ent.x - this.player.x, ent.y - this.player.y);
       if (d < bestD) {
         bestD = d;
@@ -789,9 +1404,99 @@ export class WorldSimulation {
     return best;
   }
 
-  /// 按 F 鍵與玩家身旁最近物件即時互動（上帝視角與街道漫步皆可使用）
+  // ---------- 建築物「門」與跨世界傳送邏輯 ----------
+
+  /// 取得實體門前世界座標（未傳 portal 時自動解析 entity.meta_json.portal）
+  getPortalWorldPos(ent, portal = null) {
+    if (!ent || !ent.visible) return null;
+    const p = portal || parseEntityPortal(ent);
+    if (!p) return null;
+    const meta = this.assetMap.get(ent.asset_id);
+    const sy = ent.scale_y > 0.01 ? ent.scale_y : (ent.scale || 1.0);
+    const defaultFwd = meta?.category === "building" ? 1.15 : 0.45;
+    const fwd = Number(p.door_offset_fwd ?? defaultFwd);
+    const yawRad = ((ent.yaw || 0) * Math.PI) / 180;
+    return {
+      x: ent.x + (-Math.sin(yawRad)) * fwd * sy,
+      y: ent.y + Math.cos(yawRad) * fwd * sy,
+      portal: p,
+    };
+  }
+
+  /// 尋找玩家附近最近且已啟用的門（兼顧大型建築物門口與實體邊緣距離）
+  findNearestPortal(maxDist = 2.35) {
+    if (!this.player.visible) return null;
+    let best = null;
+    let bestDist = Infinity;
+    for (const ent of this.entities) {
+      if (!ent.visible) continue;
+      const p = parseEntityPortal(ent);
+      if (!p) continue;
+      const doorPos = this.getPortalWorldPos(ent, p);
+      if (!doorPos) continue;
+      const dDoor = Math.hypot(doorPos.x - this.player.x, doorPos.y - this.player.y);
+      const col = this.getEntityCollider(ent);
+      const bodyPad = col ? Math.max(col.hx, col.hy) : 0.5;
+      const dBody = Math.max(0, Math.hypot(ent.x - this.player.x, ent.y - this.player.y) - bodyPad);
+      const d = Math.min(dDoor, dBody + 0.35);
+      if (d <= maxDist && d < bestDist) {
+        bestDist = d;
+        best = { entity: ent, portal: p, doorPos, dist: d };
+      }
+    }
+    return best;
+  }
+
+  /// 檢查開門條件並執行進門／出門傳送
+  _tryEnterPortal(ent, portal) {
+    if (!ent || !portal) return false;
+    const lockRes = this.checkPortalLock ? this.checkPortalLock(portal) : { locked: false };
+    if (lockRes && lockRes.locked) {
+      soundEngine.play("locked");
+      const pPos = this.getPortalWorldPos(ent, portal) || { x: ent.x, y: ent.y };
+      const gz = this.renderer.getTerrainElevationAt(pPos.x, pPos.y) + (ent.z || 0);
+      this.renderer.addSpeechBubble(
+        ent.id,
+        pPos.x,
+        pPos.y,
+        gz,
+        lockRes.reason || "門鎖住了，還缺少開門條件！",
+        3.0,
+      );
+      return false;
+    }
+
+    // 若玩家正在駕駛／搭乘載具，進門前自動先於門口安全下車
+    if (this.player.mountedEntityId) {
+      this.dismountPlayer(true);
+    }
+
+    const pPos = this.getPortalWorldPos(ent, portal) || { x: ent.x, y: ent.y };
+    const gz = this.renderer.getTerrainElevationAt(pPos.x, pPos.y) + (ent.z || 0);
+    soundEngine.play("door");
+    this.renderer.spawnParticles("sparkle", pPos.x, pPos.y, gz + 0.8, 22);
+    if (this.onPortalTrigger) {
+      this.onPortalTrigger(ent, portal);
+    }
+    return true;
+  }
+
+  /// 按 F 鍵與玩家身旁最近物件（或門）即時互動（上帝視角與街道漫步皆可使用）
   interactNearestToPlayer(maxDist = 2.8) {
     const target = this._findNearestToPlayer(maxDist);
+    const nearPortal = this.nearestPortal;
+
+    if (nearPortal) {
+      const targetIsOtherNonPortal =
+        target &&
+        target.id !== nearPortal.entity.id &&
+        !parseEntityPortal(target) &&
+        Math.hypot(target.x - this.player.x, target.y - this.player.y) < nearPortal.dist - 0.55;
+      if (!targetIsOtherNonPortal) {
+        return this._tryEnterPortal(nearPortal.entity, nearPortal.portal);
+      }
+    }
+
     if (!target) {
       const gz = this.renderer.getTerrainElevationAt(this.player.x, this.player.y);
       this.renderer.addSpeechBubble(
@@ -799,7 +1504,7 @@ export class WorldSimulation {
         this.player.x,
         this.player.y,
         gz,
-        "走近物件一點再按 F 就可以互動喔！",
+        "走近物件或門邊一點再按 F 就可以互動喔！",
         2.2,
       );
       return false;
@@ -904,10 +1609,10 @@ export class WorldSimulation {
 
   /// 兩物件在世界空間相遇（或玩家控制接近場景角色／動物）時自動產生互動演出
   _evaluateAutoEncounters(movingIds, nowMs) {
-    // 1. 玩家角色與周圍人物／動物／載具相遇問候（上帝視角或街道漫步皆觸發）
+    // 1. 玩家角色與周圍人物／動物／載具相遇問候（上帝視角或街道漫步皆觸發；略過目前正搭乘的載具）
     if (this.player.visible && this.player.asset_id) {
       for (const ent of this.entities) {
-        if (!ent.visible) continue;
+        if (!ent.visible || ent.id === this.player.mountedEntityId) continue;
         const dist = Math.hypot(ent.x - this.player.x, ent.y - this.player.y);
         const dz = Math.abs((ent.z || 0) - (this.player.z || 0));
         if (dist > 1.75 || dz > 1.5) continue;
@@ -1027,6 +1732,10 @@ export class WorldSimulation {
     if (!triggerDefaultFallback) return firedCustom;
 
     if (!ent) return firedCustom;
+    const portal = parseEntityPortal(ent);
+    if (portal) {
+      return this._tryEnterPortal(ent, portal);
+    }
     const cat = this.assetMap.get(ent.asset_id)?.category || "prop";
     const baseZ = this.renderer.getTerrainElevationAt(ent.x, ent.y) + (ent.z || 0);
 

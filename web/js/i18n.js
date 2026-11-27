@@ -494,10 +494,110 @@ const DICT = {
     en: "📋 Custom Checklist (Complete custom objectives)",
     ja: "📋 総合チェックリスト型（複数のカスタム目標を達成）",
   },
+
+  // 交通工具搭乘系統
+  "皇家馬車": { en: "Royal Carriage", ja: "王室馬車" },
+  "🚗 交通工具搭乘設定": { en: "🚗 Vehicle / Mount Settings", ja: "🚗 乗り物・騎乗設定" },
+  "允許玩家按 G 搭乘": { en: "Allow boarding with [G]", ja: "[G]キーで搭乗を許可" },
+  "搭乘模式": { en: "Mount Mode", ja: "搭乗モード" },
+  "🎮 玩家親自駕駛／騎乘": { en: "🎮 Player Drive / Ride", ja: "🎮 プレイヤー操縦／騎乗" },
+  "🚌 自動巡航乘客 (僅搭乘)": { en: "🚌 Auto-Cruise Passenger", ja: "🚌 自動巡回乗客 (搭乗のみ)" },
+  "🔄 兩者皆可 (Tab 鍵切換)": { en: "🔄 Both (Tab to Switch)", ja: "🔄 両方対応 (Tabで切替)" },
+  "乘載外觀": { en: "Seat Style", ja: "乗車スタイル" },
+  "🐎 開放式騎乘 (顯示玩家)": { en: "🐎 Open Seat (Show Player)", ja: "🐎 オープン騎乗 (プレイヤー表示)" },
+  "🚗 密閉車廂 (隱藏玩家)": { en: "🚗 Enclosed Cabin (Hide Player)", ja: "🚗 キャビン乗車 (プレイヤー非表示)" },
+  "移動倍率": { en: "Speed Multiplier", ja: "移動速度倍率" },
+  "座位高度": { en: "Seat Height", ja: "座席高さ" },
+  "前後偏移": { en: "Seat Forward Offset", ja: "座席前後位置" },
+  "勾選上方開關後，玩家靠近此物件按下 G 鍵即可駕駛或搭乘！": {
+    en: "Enable to let the player board or drive this object with [G]!",
+    ja: "オンにすると、プレイヤーが近くで G キーを押して搭乗・操縦できます！",
+  },
+  "🔄 切換駕駛／巡航 (Tab)": { en: "🔄 Drive / Cruise (Tab)", ja: "🔄 操縦／巡回切替 (Tab)" },
+  "🚪 下車 (G)": { en: "🚪 Dismount (G)", ja: "🚪 降りる (G)" },
+  "駕駛": { en: "Drive", ja: "運転" },
+  "騎乘": { en: "Ride", ja: "騎乗" },
+  "登船駕駛": { en: "Sail", ja: "乗船" },
+  "搭乘巡航": { en: "Board Cruise", ja: "巡回に乗る" },
+  "搭乘／駕駛": { en: "Board / Drive", ja: "搭乗／操縦" },
+  "搭乘": { en: "Board", ja: "搭乗" },
+  "WASD／方向鍵：移動・G：上下車／船／馬・空白鍵：跳躍／鳴笛・F 或雙擊物件：任務互動・右鍵旋轉・中鍵／✋拖曳：移動畫面": {
+    en: "WASD/Arrows: Move · G: Board/Dismount · Space: Jump/Horn · F/Dbl-Click: Interact · Right-Drag: Orbit · Middle/Pan: Move Camera",
+    ja: "WASD/矢印：移動・G：乗り降り・Space：ジャンプ/クラクション・F/ダブルクリック：会話・右ドラッグ：回転・中ボタン：視点移動",
+  },
+  "WASD／方向鍵：移動・G：上下車／船／馬・空白鍵：跳躍／鳴笛・F 或點擊物件：任務互動・右鍵旋轉・中鍵／Space+左鍵：平移畫面": {
+    en: "WASD/Arrows: Move · G: Board/Dismount · Space: Jump/Horn · F/Click: Interact · Right-Drag: Orbit · Space+Drag: Pan",
+    ja: "WASD/矢印：移動・G：乗り降り・Space：ジャンプ/クラクション・F/クリック：会話・右ドラッグ：回転・Space+ドラッグ：移動",
+  },
+
+  // 建築物「門」與跨世界探索系統
+  "古典木門": { en: "Classic Wooden Door", ja: "クラシック木製ドア" },
+  "星光傳送門": { en: "Starlight Portal", ja: "スターライトポータル" },
+  "🚪 建築物出入口（門）設定": { en: "🚪 Building Door / Portal Settings", ja: "🚪 建物ドア・ポータル設定" },
+  "啟用門傳送": { en: "Enable Door Portal", ja: "ドア移動を有効化" },
+  "✨ 一鍵建立並連結全新室內世界（自動放回程門）": {
+    en: "✨ 1-Click Create & Link Interior World (Auto Exit Door)",
+    ja: "✨ ワンクリックで屋内ワールド作成＆双方向ドア接続",
+  },
+  "✨ 一鍵建立室內世界並建立雙向門": {
+    en: "✨ Create Interior World & Link 2-Way Doors",
+    ja: "✨ 屋内ワールドを作成し双方向ドアを接続",
+  },
+  "門的類型": { en: "Door Type", ja: "ドア種類" },
+  "🚪 進入目標世界 (Enter)": { en: "🚪 Enter Target World", ja: "🚪 対象ワールドへ入る" },
+  "🔙 離開返回原世界 (Exit)": { en: "🔙 Exit to Previous World", ja: "🔙 元のワールドへ戻る" },
+  "門牌提示": { en: "Door Prompt Label", ja: "ドア案内ラベル" },
+  "目標世界": { en: "Target World", ja: "移動先ワールド" },
+  "落點座標": { en: "Spawn Pos", ja: "到着座標" },
+  "門前距": { en: "Door Dist", ja: "ドア前距離" },
+  "開門條件": { en: "Unlock Req", ja: "解錠条件" },
+  "上鎖提示": { en: "Locked Msg", ja: "施錠メッセージ" },
+  "💾 儲存門設定": { en: "💾 Save Door", ja: "💾 ドア保存" },
+  "🚪 立即進門前往": { en: "🚪 Enter Door Now", ja: "🚪 今すぐドアに入る" },
+  "正在穿越門扉前往新世界...": { en: "Stepping through the door...", ja: "ドアを通って新しいワールドへ移動中..." },
+  "📦 下載多世界編輯包（.stackpack.zip）": {
+    en: "📦 Download Multi-World Pack (.stackpack.zip)",
+    ja: "📦 マルチワールドパック (.stackpack.zip) をダウンロード",
+  },
+  "🌍 匯入世界／專案": { en: "🌍 Import World / Pack", ja: "🌍 ワールド／パック読込" },
+
+  // 社畜的一天 5 世界企劃與新增物件
+  "粉領女上班族": { en: "Office Lady", ja: "オフィスレディ" },
+  "公車站牌候車亭": { en: "Bus Stop Shelter", ja: "バス停" },
+  "精品咖啡茶水吧": { en: "Espresso Coffee Bar", ja: "カフェバー" },
+  "多功能事務印表機": { en: "Office Printer", ja: "複合プリンター" },
+  "浴室洗手台鏡櫃": { en: "Bathroom Vanity Sink", ja: "洗面台ミラー" },
+  "🌟 多世界完整企劃劇本（門 ＋ 交通工具跨世界聯動）": {
+    en: "🌟 Multi-World Playable Campaign (Linked Doors & Transit)",
+    ja: "🌟 マルチワールド連動シナリオ（ドア＆バス通勤）",
+  },
+  "💼 社畜的一天（5 世界聯動完整企劃）": {
+    en: "💼 Office Worker's Day (5 Linked Worlds)",
+    ja: "💼 社畜の一日（5ワールド連動シナリオ）",
+  },
+  "女上班族主角・溫馨住家 ↔ 208 號固定路線公車都市 ↔ 公司辦公室 ↔ 生活大賣場 ↔ 療癒餐廳": {
+    en: "Female Office Worker · Home ↔ Bus Route City ↔ Office ↔ Mall ↔ Restaurant",
+    ja: "OL主人公・自宅 ↔ 208号巡回バスの街 ↔ オフィス ↔ スーパー ↔ レストラン",
+  },
 };
 
 // 動態文字樣板比對（繁體中文原句 -> { en, ja } 轉換函式）
 const DYNAMIC_RULES = [
+  {
+    re: /^\[F\] 🚪 (.+)$/,
+    en: (m) => `[F] 🚪 ${m[1]}`,
+    ja: (m) => `[F] 🚪 ${m[1]}`,
+  },
+  {
+    re: /^\[F\] 🔒 (.+)$/,
+    en: (m) => `[F] 🔒 ${m[1]} (Locked)`,
+    ja: (m) => `[F] 🔒 ${m[1]} (施錠中)`,
+  },
+  {
+    re: /^\[G\] (.+?) (.+?)：(.+)$/,
+    en: (m) => `[G] ${m[1]} ${tr(m[2], "en")}: ${m[3]}`,
+    ja: (m) => `[G] ${m[1]} ${tr(m[2], "ja")}：${m[3]}`,
+  },
   {
     re: /^移動路徑 \((\d+)\)$/,
     en: (m) => `Movement Paths (${m[1]})`,

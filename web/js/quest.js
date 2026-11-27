@@ -154,6 +154,7 @@ export class QuestManager {
       if (this.app.worldState?.meta) {
         this.app.worldState.meta.quest_progress = JSON.parse(JSON.stringify(this.progress));
       }
+      this.app.syncSharedAdventureFromQuest?.();
       await this.app._patchWorldMeta({ quest_progress: this.progress });
     };
     if (immediate) {
@@ -346,6 +347,64 @@ export class QuestManager {
       return true;
     }
     return false;
+  }
+
+  hasItem(name) {
+    const clean = (name || "").trim();
+    if (!clean) return true;
+    return (this.progress.items || []).includes(clean);
+  }
+
+  hasFlag(key) {
+    const clean = (key || "").trim();
+    if (!clean) return true;
+    return Boolean(this.progress.flags?.[clean]);
+  }
+
+  /// 匯出可供跨世界旅行攜帶的冒險進度（積分／血量護盾／背包道具／線索／旗標／累計探索數）
+  exportSharedAdventure() {
+    const p = this.progress;
+    return {
+      score: Number(p.score || 0),
+      hp: Number(p.hp ?? 5),
+      max_hp: Number(p.max_hp ?? 5),
+      shield: Number(p.shield || 0),
+      items: [...(p.items || [])],
+      clues: (p.clues || []).map((c) => ({ ...c })),
+      flags: { ...(p.flags || {}) },
+      treasures_found: Number(p.treasures_found || 0),
+      puzzles_solved: Number(p.puzzles_solved || 0),
+    };
+  }
+
+  /// 進入新世界或回到原世界後，將跨世界共享進度合併套用並檢查是否達成本世界過關條件
+  applySharedAdventure(shared) {
+    if (!shared || typeof shared !== "object") return { newlyCompleted: false };
+    const p = this.progress;
+    p.score = Math.max(0, Number(shared.score ?? p.score ?? 0));
+    p.max_hp = Math.max(1, Number(shared.max_hp ?? p.max_hp ?? 5));
+    p.hp = Math.max(0, Math.min(p.max_hp, Number(shared.hp ?? p.hp ?? p.max_hp)));
+    p.shield = Math.max(0, Number(shared.shield ?? p.shield ?? 0));
+    p.treasures_found = Math.max(0, Number(shared.treasures_found ?? p.treasures_found ?? 0));
+    p.puzzles_solved = Math.max(0, Number(shared.puzzles_solved ?? p.puzzles_solved ?? 0));
+
+    for (const it of shared.items || []) {
+      this._addItem(it);
+    }
+    for (const cl of shared.clues || []) {
+      this._addClue(cl.sourceId, cl.sourceName, cl.text);
+    }
+    p.flags = { ...(p.flags || {}), ...(shared.flags || {}) };
+
+    this.renderQuestHud();
+    if (this.app.worldState?.meta) {
+      this.app.worldState.meta.quest_progress = JSON.parse(JSON.stringify(this.progress));
+    }
+    this.app._patchWorldMeta?.({ quest_progress: this.progress });
+
+    const wasCompleted = Boolean(p.completed);
+    const newlyCompleted = !wasCompleted && this.checkVictory(false);
+    return { newlyCompleted };
   }
 
   _grantCommonRewards(entity, inter) {

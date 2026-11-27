@@ -809,7 +809,10 @@ export class StackCityRenderer {
       const cached = this.assetTextures.get(assetMeta.id);
       if (cached.sha256 === assetMeta.sha256) return cached;
     }
-    const embedded = window.__STACKCITY_STANDALONE__?.textures?.[assetMeta.id];
+    const standalone = window.__STACKCITY_STANDALONE__;
+    const embedded =
+      standalone?.texturePool?.[assetMeta.sha256] ||
+      standalone?.textures?.[assetMeta.id];
     const base = `/api/worlds/${encodeURIComponent(worldFile)}/assets/${encodeURIComponent(assetMeta.id)}`;
     const loadImg = (url, isDataUrl = false) =>
       new Promise((resolve, reject) => {
@@ -950,14 +953,16 @@ export class StackCityRenderer {
       } else {
         if (player && player.visible) {
           const gz = this.getTerrainElevationAt(player.x, player.y);
-          target = [player.x, player.y, gz + (player.z || 0) + 0.95];
+          const isMounted = Boolean(player.mountedEntityId);
+          target = [player.x, player.y, gz + (player.z || 0) + (isMounted ? 1.15 : 0.95)];
         } else {
           target = [cam.walkPos[0], cam.walkPos[1], cam.walkPos[2] + 0.95];
         }
         yaw = cam.walkYaw;
       }
-      pitch = 0.36;
-      dist = 5.2;
+      const isMounted = Boolean(player && player.mountedEntityId && !cam.followEntityId);
+      pitch = isMounted ? 0.40 : 0.36;
+      dist = isMounted ? 6.6 : 5.2;
       fov = (50 * Math.PI) / 180;
     }
 
@@ -1176,7 +1181,12 @@ export class StackCityRenderer {
 
     // 2. 合併世界物件與玩家角色化身，依資產分組以 GPU Instancing 繪製
     const renderList = simState.entities.slice();
-    if (simState.player && simState.player.visible && simState.player.asset_id) {
+    if (
+      simState.player &&
+      simState.player.visible &&
+      simState.player.asset_id &&
+      !simState.player.playerHiddenInVehicle
+    ) {
       renderList.push(simState.player);
     }
 
@@ -1475,19 +1485,28 @@ export class StackCityRenderer {
       }
     }
 
-    // 玩家角色（Avatar）腳底金色光環、面向箭頭與頭頂名牌
+    // 玩家角色（Avatar）腳底金色光環、面向箭頭與頭頂名牌（搭乘時依載具調整光環與名牌圖示）
     if (simState.player && simState.player.visible) {
       const pl = simState.player;
+      const mountedVeh = pl.mountedEntityId
+        ? simState.entities.find((e) => e.id === pl.mountedEntityId)
+        : null;
       const pz = this.getTerrainElevationAt(pl.x, pl.y) + (pl.z || 0) + 0.04;
-      const centerSc = this.projectToScreen(pl.x, pl.y, pz);
+      const ringZ = mountedVeh
+        ? this.getTerrainElevationAt(mountedVeh.x, mountedVeh.y) + (mountedVeh.z || 0) + 0.05
+        : pz;
+      const ringX = mountedVeh ? mountedVeh.x : pl.x;
+      const ringY = mountedVeh ? mountedVeh.y : pl.y;
+      const ringRadius = mountedVeh ? 0.56 : 0.32;
+      const centerSc = this.projectToScreen(ringX, ringY, ringZ);
       if (centerSc) {
-        // 繪製地面金色雙光環（透過多邊形投影貼合透視）
-        ctx.strokeStyle = "#facc15";
-        ctx.lineWidth = 2.6 * this.dpr;
+        // 繪製地面金色光環（透過多邊形投影貼合透視）
+        ctx.strokeStyle = mountedVeh ? "#fbbf24" : "#facc15";
+        ctx.lineWidth = (mountedVeh ? 3.0 : 2.6) * this.dpr;
         ctx.beginPath();
         for (let i = 0; i <= 24; i++) {
           const a = (i / 24) * Math.PI * 2;
-          const sc = this.projectToScreen(pl.x + Math.cos(a) * 0.32, pl.y + Math.sin(a) * 0.32, pz);
+          const sc = this.projectToScreen(ringX + Math.cos(a) * ringRadius, ringY + Math.sin(a) * ringRadius, ringZ);
           if (!sc) continue;
           if (i === 0) ctx.moveTo(sc[0], sc[1]);
           else ctx.lineTo(sc[0], sc[1]);
@@ -1495,15 +1514,21 @@ export class StackCityRenderer {
         ctx.stroke();
 
         // 玩家名牌
-        const tagSc = this.projectToScreen(pl.x, pl.y, pz + 1.55 * (pl.scale_z || pl.scale || 1.0));
+        const tagOffset = pl.playerHiddenInVehicle
+          ? 1.15
+          : 1.55 * (pl.scale_z || pl.scale || 1.0);
+        const tagSc = this.projectToScreen(pl.x, pl.y, pz + tagOffset);
         if (tagSc) {
           const tFn = window.__stackCityI18n?.tr;
-          const rawPlLabel = `⭐ ${pl.name || "冒險玩家"}`;
+          const mountIcon = mountedVeh && simState._getMountIcon
+            ? simState._getMountIcon(mountedVeh, pl.mountConfig)
+            : "⭐";
+          const rawPlLabel = `${mountIcon} ${pl.name || "冒險玩家"}`;
           const plLabel = tFn ? tFn(rawPlLabel) : rawPlLabel;
           ctx.font = `bold ${11 * this.dpr}px "Noto Sans TC", sans-serif`;
           const pw = ctx.measureText(plLabel).width + 14 * this.dpr;
           const ph = 20 * this.dpr;
-          ctx.fillStyle = "rgba(180, 83, 9, 0.88)";
+          ctx.fillStyle = mountedVeh ? "rgba(146, 64, 14, 0.9)" : "rgba(180, 83, 9, 0.88)";
           ctx.strokeStyle = "#fde047";
           ctx.lineWidth = 1.6 * this.dpr;
           ctx.beginPath();
@@ -1520,10 +1545,48 @@ export class StackCityRenderer {
 
     // 任務 NPC／物件頭頂角色徽章（線索／考驗／劫匪／支援／寶藏／嫌疑人）
     const nearestId = simState.nearestToPlayer?.id || null;
+    const nearestRideId = !simState.player?.mountedEntityId ? (simState.nearestRideable?.entity?.id || null) : null;
+    const nearestPortalId = simState.nearestPortal?.entity?.id || null;
     const hoverId = (this.camera.walkMode || simState.visitorMode) && this.hoverEntity ? this.hoverEntity.id : null;
+
+    // 建築物「門」與傳送門地面呼吸光圈及門口標記
+    if (simState.getPortalWorldPos) {
+      const pulse = 0.5 + 0.5 * Math.sin(performance.now() * 0.0042);
+      for (const ent of simState.entities || []) {
+        if (!ent.visible) continue;
+        const pInfo = simState.getPortalWorldPos(ent);
+        if (!pInfo) continue;
+        const { x: dx, y: dy, portal } = pInfo;
+        const dz = this.getTerrainElevationAt(dx, dy) + 0.06;
+        const isExit = portal.kind === "exit";
+        const ringCol = isExit ? "rgba(251, 191, 36, 0.9)" : "rgba(56, 189, 248, 0.92)";
+        const rad = 0.42 + pulse * 0.1;
+
+        ctx.strokeStyle = ringCol;
+        ctx.lineWidth = 2.4 * this.dpr;
+        ctx.beginPath();
+        for (let i = 0; i <= 20; i++) {
+          const a = (i / 20) * Math.PI * 2;
+          const sc = this.projectToScreen(dx + Math.cos(a) * rad, dy + Math.sin(a) * rad, dz);
+          if (!sc) continue;
+          if (i === 0) ctx.moveTo(sc[0], sc[1]);
+          else ctx.lineTo(sc[0], sc[1]);
+        }
+        ctx.stroke();
+
+        const centerSc = this.projectToScreen(dx, dy, dz + 0.12);
+        if (centerSc && ent.id !== nearestPortalId) {
+          ctx.font = `bold ${11 * this.dpr}px "Noto Sans TC", sans-serif`;
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillText("🚪", centerSc[0], centerSc[1]);
+        }
+      }
+    }
+
     if (simState.getQuestBadge) {
       for (const ent of simState.entities || []) {
-        if (!ent.visible || ent.id === nearestId || ent.id === hoverId) continue;
+        if (!ent.visible || ent.id === nearestId || ent.id === nearestRideId || ent.id === nearestPortalId || ent.id === hoverId) continue;
         const badge = simState.getQuestBadge(ent);
         if (!badge) continue;
         const ez = this.getTerrainElevationAt(ent.x, ent.y) + (ent.z || 0) + 1.45 * (ent.scale_z || ent.scale || 1.0);
@@ -1544,27 +1607,79 @@ export class StackCityRenderer {
       }
     }
 
-    // 玩家身旁可互動物件 [F] 鍵提示（上帝視角與街道漫步皆顯示）
-    if (simState.player && simState.player.visible && simState.nearestToPlayer && (!this.hoverEntity || this.hoverEntity.id !== simState.nearestToPlayer.id)) {
-      const ne = simState.nearestToPlayer;
+    const drawPromptPill = (scX, scY, text, bgColor) => {
+      const label = window.__stackCityI18n?.tr ? window.__stackCityI18n.tr(text) : text;
+      ctx.font = `bold ${11 * this.dpr}px "Noto Sans TC", sans-serif`;
+      const tw = ctx.measureText(label).width + 16 * this.dpr;
+      const th = 22 * this.dpr;
+      ctx.fillStyle = bgColor;
+      ctx.beginPath();
+      ctx.roundRect(scX - tw * 0.5, scY - th, tw, th, 6 * this.dpr);
+      ctx.fill();
+      ctx.fillStyle = "#ffffff";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(label, scX, scY - th * 0.5);
+      return th;
+    };
+
+    const getRideActionWord = (ent, cfg) => {
+      if (!cfg) return "搭乘";
+      if (cfg.mode === "passenger") return "搭乘巡航";
+      if (cfg.mobility === "water") return "登船駕駛";
+      if (cfg.mode === "both" && cfg.hasPath) return "搭乘／駕駛";
+      const s = `${ent?.name || ""}`;
+      if (/(馬|horse|pony)/i.test(s) && !/(馬車|carriage|wagon)/i.test(s)) return "騎乘";
+      return "駕駛";
+    };
+
+    // 玩家身旁可互動物件 [F] 鍵、門 [F] 🚪 提示與可搭乘交通工具 [G] 鍵提示（互不遮擋）
+    const nr = simState.player && simState.player.visible && !simState.player.mountedEntityId
+      ? simState.nearestRideable
+      : null;
+    const np = simState.player && simState.player.visible ? simState.nearestPortal : null;
+    const ne = simState.player && simState.player.visible ? simState.nearestToPlayer : null;
+    const neWillDraw = Boolean(ne && (!np || np.entity.id !== ne.id) && (!this.hoverEntity || this.hoverEntity.id !== ne.id));
+    const sameTarget = Boolean(nr && neWillDraw && nr.entity.id === ne.id);
+
+    if (np) {
+      const pe = np.entity;
+      const pPos = np.doorPos || { x: pe.x, y: pe.y };
+      const pz = this.getTerrainElevationAt(pPos.x, pPos.y) + (pe.z || 0) + 1.25;
+      const sc = this.projectToScreen(pPos.x, pPos.y, pz);
+      if (sc) {
+        const lockInfo = simState.checkPortalLock ? simState.checkPortalLock(np.portal) : { locked: false };
+        const pLabel = np.portal.label || (np.portal.kind === "exit" ? "離開建築返回原世界" : `進入「${pe.name}」`);
+        const rawLbl = lockInfo?.locked ? `[F] 🔒 ${pLabel}` : `[F] 🚪 ${pLabel}`;
+        const pillBg = lockInfo?.locked ? "rgba(185, 28, 28, 0.94)" : "rgba(37, 99, 235, 0.94)";
+        drawPromptPill(sc[0], sc[1], rawLbl, pillBg);
+      }
+    }
+
+    if (neWillDraw) {
       const nz = this.getTerrainElevationAt(ne.x, ne.y) + (ne.z || 0) + 1.15;
       const sc = this.projectToScreen(ne.x, ne.y, nz);
       if (sc) {
         const qb = simState.getQuestBadge ? simState.getQuestBadge(ne) : null;
         const actLbl = qb ? qb.actionLabel : "互動";
         const rawLbl = this.camera.walkMode ? `[F] 或點擊${actLbl}：${ne.name}` : `[F] ${actLbl}：${ne.name}`;
-        const label = window.__stackCityI18n?.tr ? window.__stackCityI18n.tr(rawLbl) : rawLbl;
-        ctx.font = `bold ${11 * this.dpr}px "Noto Sans TC", sans-serif`;
-        const tw = ctx.measureText(label).width + 16 * this.dpr;
-        const th = 22 * this.dpr;
-        ctx.fillStyle = "rgba(16, 185, 129, 0.92)";
-        ctx.beginPath();
-        ctx.roundRect(sc[0] - tw * 0.5, sc[1] - th, tw, th, 6 * this.dpr);
-        ctx.fill();
-        ctx.fillStyle = "#ffffff";
-        ctx.textAlign = "center";
-        ctx.textBaseline = "middle";
-        ctx.fillText(label, sc[0], sc[1] - th * 0.5);
+        const th = drawPromptPill(sc[0], sc[1], rawLbl, "rgba(16, 185, 129, 0.92)");
+        if (sameTarget) {
+          const rideLbl = getRideActionWord(nr.entity, nr.config);
+          const icon = simState._getMountIcon ? simState._getMountIcon(nr.entity, nr.config) : "🚗";
+          drawPromptPill(sc[0], sc[1] - th - 5 * this.dpr, `[G] ${icon} ${rideLbl}：${nr.entity.name}`, "rgba(217, 119, 6, 0.95)");
+        }
+      }
+    }
+
+    if (nr && !sameTarget) {
+      const re = nr.entity;
+      const rz = this.getTerrainElevationAt(re.x, re.y) + (re.z || 0) + 1.2;
+      const sc = this.projectToScreen(re.x, re.y, rz);
+      if (sc) {
+        const rideLbl = getRideActionWord(re, nr.config);
+        const icon = simState._getMountIcon ? simState._getMountIcon(re, nr.config) : "🚗";
+        drawPromptPill(sc[0], sc[1], `[G] ${icon} ${rideLbl}：${re.name}`, "rgba(217, 119, 6, 0.95)");
       }
     }
 

@@ -71,7 +71,7 @@ pub struct ExportHtmlQuery {
     pub preview: Option<String>,
 }
 
-/// 匯出「單純遊戲分享」之獨立單檔 `.html` 網頁（鎖定純玩家遊玩模式、無法編輯修改）
+/// 匯出「單純遊戲分享」之獨立單檔 `.html` 網頁（自動遞迴打包所有透過「門」相連的關聯世界＋貼圖 SHA256 去重）
 pub async fn export_world_html(
     State(st): State<AppState>,
     Path(file): Path<String>,
@@ -84,9 +84,27 @@ pub async fn export_world_html(
         .unwrap_or(&file)
         .to_string();
 
+    let linked_worlds = db::collect_linked_worlds(&st.data_dir, &safe_name).map_err(ApiError::internal)?;
     let full_state = db::load_full_world_state(&path, &safe_name).map_err(ApiError::internal)?;
-    let textures_map = db::load_all_asset_textures_base64(&path).map_err(ApiError::internal)?;
     let bgm_data_url = db::read_world_bgm_data_url(&path).map_err(ApiError::internal)?;
+
+    let mut texture_pool: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
+    let mut worlds_map: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
+
+    for lw in &linked_worlds {
+        db::load_asset_textures_by_sha256(&lw.path, &mut texture_pool)
+            .map_err(ApiError::internal)?;
+        let st_data = db::load_full_world_state(&lw.path, &lw.file_name)
+            .map_err(ApiError::internal)?;
+        let lw_bgm = db::read_world_bgm_data_url(&lw.path).map_err(ApiError::internal)?;
+        worlds_map.insert(
+            lw.world_id.clone(),
+            json!({
+                "state": st_data,
+                "bgmDataUrl": lw_bgm,
+            }),
+        );
+    }
 
     let style_css = get_embedded_web_text("css/style.css")
         .ok_or_else(|| ApiError::internal("找不到內嵌樣式表 css/style.css。"))?;
@@ -104,9 +122,11 @@ pub async fn export_world_html(
         .ok_or_else(|| ApiError::internal("找不到內嵌啟動器 js/standalone_bootstrap.js。"))?;
 
     let payload_json = serde_json::to_string(&json!({
+        "entryWorldId": full_state.meta.world_id,
         "state": full_state,
-        "textures": textures_map,
         "bgmDataUrl": bgm_data_url,
+        "texturePool": texture_pool,
+        "worlds": worlds_map,
     }))
     .map_err(|e| ApiError::internal(format!("序列化世界遊戲封包失敗：{e}")))?;
     let safe_payload = escape_json_for_inline_script(&payload_json);
@@ -206,16 +226,26 @@ pub async fn export_world_html(
         </div>
 
         <div id="cityWalkBanner" class="citywalk-banner hidden">
-          <span>🚶 <strong>CityRT 街道漫步</strong>｜WASD 移動（A左/D右）、按住拖曳轉向、點擊或按 F 與身旁物件互動、空白鍵跳躍</span>
+          <span>🚶 <strong>CityRT 街道漫步</strong>｜WASD 移動（A左/D右）、按住拖曳轉向、點擊或按 F 與身旁物件互動、按 G 搭乘交通工具、空白鍵跳躍</span>
           <button id="btnWalkChangeAvatar" class="btn btn-gold" style="padding:3px 9px;">🧑 換造型</button>
           <button id="btnExitWalk" class="btn btn-sub">返回上帝視角</button>
         </div>
 
+        <div id="mountBanner" class="mount-banner hidden">
+          <span id="mountBannerText">🚗 正在駕駛載具</span>
+          <button id="btnMountSwitchMode" class="btn btn-sub hidden" style="padding:3px 9px;">🔄 切換駕駛／巡航 (Tab)</button>
+          <button id="btnMountDismount" class="btn btn-gold" style="padding:3px 9px;">🚪 下車 (G)</button>
+        </div>
+
         <div id="hudHint" class="hud-bottom-hint">
-          WASD／方向鍵：操控玩家移動・空白鍵：跳躍・F 或點擊物件：任務互動・右鍵旋轉・中鍵／Space+左鍵：平移畫面
+          WASD／方向鍵：移動・G：上下車／船／馬・空白鍵：跳躍／鳴笛・F 或點擊物件：任務互動・右鍵旋轉・中鍵／Space+左鍵：平移畫面
         </div>
 
         <div id="questHud" class="quest-hud hidden"></div>
+        <div id="portalTransition" class="portal-transition">
+          <div class="portal-transition-icon">🚪</div>
+          <div id="portalTransitionText">正在穿越門扉前往新世界...</div>
+        </div>
         <div id="toastStack" class="toast-stack"></div>
       </section>
     </main>
@@ -295,9 +325,9 @@ const {{ StackCityRenderer, renderStackThumbnail }} = (() => {{
 return {{ StackCityRenderer, renderStackThumbnail }};
 }})();
 
-const {{ WorldSimulation }} = (() => {{
+const {{ WorldSimulation, parseEntityVehicle, buildEntityMetaWithVehicle, parseEntityPortal, buildEntityMetaWithPortal }} = (() => {{
 {bundled_simulation}
-return {{ WorldSimulation }};
+return {{ WorldSimulation, parseEntityVehicle, buildEntityMetaWithVehicle, parseEntityPortal, buildEntityMetaWithPortal }};
 }})();
 
 const {{ INTERACTION_META, GOAL_TYPE_LABELS, parseEntityInteraction, buildEntityMetaWithInteraction, QuestManager }} = (() => {{
@@ -399,8 +429,73 @@ pub async fn import_world(
         }
     }
 
-    let bytes = db_bytes.ok_or_else(|| ApiError::bad_req("請選擇好友分享的 .stackworld.db 檔案。"))?;
+    let bytes = db_bytes.ok_or_else(|| ApiError::bad_req("請選擇好友分享的 .stackworld.db 或 .stackpack.zip 檔案。"))?;
+    let is_zip = bytes.starts_with(b"PK\x03\x04")
+        || file_name
+            .as_deref()
+            .map(|s| s.to_ascii_lowercase().ends_with(".zip"))
+            .unwrap_or(false);
+    if is_zip {
+        let (entry_world, imported_worlds) =
+            db::import_world_pack_zip_bytes(&bytes, &st.data_dir).map_err(ApiError::bad_req)?;
+        let count = imported_worlds.len();
+        return Ok(Json(json!({
+            "world": entry_world,
+            "imported_worlds": imported_worlds,
+            "count": count,
+            "is_pack": true
+        })));
+    }
     let summary = db::import_world_db_bytes(&bytes, &st.data_dir, file_name.as_deref())
         .map_err(ApiError::bad_req)?;
-    Ok(Json(json!({ "world": summary })))
+    Ok(Json(json!({ "world": summary, "is_pack": false })))
+}
+
+/// 匯出 `.stackpack.zip` 多世界編輯包（含入口世界與所有透過「門」相連之室內外世界）
+pub async fn export_world_pack(
+    State(st): State<AppState>,
+    Path(file): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let (bytes, entry_name, _count) =
+        db::export_world_pack_zip_bytes(&st.data_dir, &file).map_err(ApiError::bad_req)?;
+    let clean_base = entry_name
+        .chars()
+        .map(|c| {
+            if matches!(c, '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect::<String>();
+    let dl_name = format!(
+        "{}_多世界編輯包.stackpack.zip",
+        if clean_base.trim().is_empty() {
+            "stackcity"
+        } else {
+            clean_base.trim()
+        }
+    );
+    let encoded_name = url_encode_filename(&dl_name);
+
+    Ok((
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "application/zip".to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"stackcity-pack.zip\"; filename*=UTF-8''{encoded_name}"),
+            ),
+            (header::CACHE_CONTROL, "no-store".to_string()),
+        ],
+        bytes,
+    ))
+}
+
+/// 匯入 `.stackpack.zip` 多世界編輯包（自動重配全新世界 UUID 並重寫所有門連結）
+pub async fn import_world_pack(
+    State(st): State<AppState>,
+    multipart: Multipart,
+) -> Result<Json<Value>, ApiError> {
+    import_world(State(st), multipart).await
 }

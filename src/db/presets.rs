@@ -17,22 +17,22 @@ use std::collections::HashMap;
 use std::path::Path;
 use uuid::Uuid;
 
-struct WorldBuilder<'a> {
-    conn: &'a Connection,
-    data_dir: &'a Path,
-    w: i32,
-    h: i32,
-    tiles: Vec<TerrainTile>,
-    asset_map: HashMap<String, AssetMeta>,
-    entities: Vec<WorldEntity>,
-    paths: Vec<MovementPath>,
-    zones: Vec<WanderZone>,
-    events: Vec<EventRule>,
-    quest_config: Option<Value>,
+pub(super) struct WorldBuilder<'a> {
+    pub(super) conn: &'a Connection,
+    pub(super) data_dir: &'a Path,
+    pub(super) w: i32,
+    pub(super) h: i32,
+    pub(super) tiles: Vec<TerrainTile>,
+    pub(super) asset_map: HashMap<String, AssetMeta>,
+    pub(super) entities: Vec<WorldEntity>,
+    pub(super) paths: Vec<MovementPath>,
+    pub(super) zones: Vec<WanderZone>,
+    pub(super) events: Vec<EventRule>,
+    pub(super) quest_config: Option<Value>,
 }
 
 impl<'a> WorldBuilder<'a> {
-    fn new(conn: &'a Connection, data_dir: &'a Path, w: i32, h: i32, default_ground: &str) -> Self {
+    pub(super) fn new(conn: &'a Connection, data_dir: &'a Path, w: i32, h: i32, default_ground: &str) -> Self {
         let mut tiles = Vec::with_capacity((w * h) as usize);
         for y in 0..h {
             for x in 0..w {
@@ -61,14 +61,14 @@ impl<'a> WorldBuilder<'a> {
         }
     }
 
-    fn tile_mut(&mut self, x: i32, y: i32) -> Option<&mut TerrainTile> {
+    pub(super) fn tile_mut(&mut self, x: i32, y: i32) -> Option<&mut TerrainTile> {
         if x < 0 || y < 0 || x >= self.w || y >= self.h {
             return None;
         }
         Some(&mut self.tiles[(y * self.w + x) as usize])
     }
 
-    fn fill_rect(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, elev: i32, ground: &str, road: &str) {
+    pub(super) fn fill_rect(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, elev: i32, ground: &str, road: &str) {
         for y in y0.max(0)..y1.min(self.h) {
             for x in x0.max(0)..x1.min(self.w) {
                 if let Some(t) = self.tile_mut(x, y) {
@@ -80,7 +80,7 @@ impl<'a> WorldBuilder<'a> {
         }
     }
 
-    fn set_road_line(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, road: &str) {
+    pub(super) fn set_road_line(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, road: &str) {
         let steps = (x1 - x0).abs().max((y1 - y0).abs()).max(1);
         for i in 0..=steps {
             let x = x0 + ((x1 - x0) * i) / steps;
@@ -97,7 +97,7 @@ impl<'a> WorldBuilder<'a> {
         }
     }
 
-    fn ensure_asset(&mut self, key: &str, slices: usize) -> Result<AssetMeta, String> {
+    pub(super) fn ensure_asset(&mut self, key: &str, slices: usize) -> Result<AssetMeta, String> {
         if let Some(a) = self.asset_map.get(key) {
             return Ok(a.clone());
         }
@@ -108,7 +108,7 @@ impl<'a> WorldBuilder<'a> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn spawn(
+    pub(super) fn spawn(
         &mut self,
         asset_key: &str,
         slices: usize,
@@ -146,7 +146,7 @@ impl<'a> WorldBuilder<'a> {
         Ok(id)
     }
 
-    fn add_path(
+    pub(super) fn add_path(
         &mut self,
         name: &str,
         entity_id: &str,
@@ -174,7 +174,7 @@ impl<'a> WorldBuilder<'a> {
         id
     }
 
-    fn add_wander_zone(
+    pub(super) fn add_wander_zone(
         &mut self,
         name: &str,
         cx: f64,
@@ -196,7 +196,7 @@ impl<'a> WorldBuilder<'a> {
         });
     }
 
-    fn add_event(
+    pub(super) fn add_event(
         &mut self,
         name: &str,
         trigger_type: &str,
@@ -215,7 +215,7 @@ impl<'a> WorldBuilder<'a> {
         });
     }
 
-    fn set_interaction(&mut self, entity_id: &str, interaction: Value) {
+    pub(super) fn set_interaction(&mut self, entity_id: &str, interaction: Value) {
         if let Some(ent) = self.entities.iter_mut().find(|e| e.id == entity_id) {
             let mut root = serde_json::from_str::<Value>(&ent.meta_json).unwrap_or_else(|_| json!({}));
             if let Some(obj) = root.as_object_mut() {
@@ -227,17 +227,41 @@ impl<'a> WorldBuilder<'a> {
         }
     }
 
-    fn set_tint(&mut self, entity_id: &str, hex: &str) {
+    pub(super) fn set_portal(&mut self, entity_id: &str, portal: Value) {
+        if let Some(ent) = self.entities.iter_mut().find(|e| e.id == entity_id) {
+            let mut root = serde_json::from_str::<Value>(&ent.meta_json).unwrap_or_else(|_| json!({}));
+            if let Some(obj) = root.as_object_mut() {
+                obj.insert("portal".to_string(), portal);
+            } else {
+                root = json!({ "portal": portal });
+            }
+            ent.meta_json = root.to_string();
+        }
+    }
+
+    pub(super) fn set_vehicle(&mut self, entity_id: &str, vehicle: Value) {
+        if let Some(ent) = self.entities.iter_mut().find(|e| e.id == entity_id) {
+            let mut root = serde_json::from_str::<Value>(&ent.meta_json).unwrap_or_else(|_| json!({}));
+            if let Some(obj) = root.as_object_mut() {
+                obj.insert("vehicle".to_string(), vehicle);
+            } else {
+                root = json!({ "vehicle": vehicle });
+            }
+            ent.meta_json = root.to_string();
+        }
+    }
+
+    pub(super) fn set_tint(&mut self, entity_id: &str, hex: &str) {
         if let Some(ent) = self.entities.iter_mut().find(|e| e.id == entity_id) {
             ent.tint_hex = hex.to_string();
         }
     }
 
-    fn set_quest(&mut self, cfg: Value) {
+    pub(super) fn set_quest(&mut self, cfg: Value) {
         self.quest_config = Some(cfg);
     }
 
-    fn flush(self, meta_pairs: Vec<(&str, String)>) -> Result<(), String> {
+    pub(super) fn flush(self, meta_pairs: Vec<(&str, String)>) -> Result<(), String> {
         let quest_cfg = self.quest_config;
         for (k, v) in meta_pairs {
             set_meta_kv(self.conn, k, &v)?;
@@ -1306,7 +1330,7 @@ fn build_blank(b: &mut WorldBuilder<'_>) -> Result<(), String> {
 }
 
 /// 輔助建構建築內部 L 型立體剖面牆體（北牆 y:0..2、西牆 x:0..2）
-fn build_interior_walls(b: &mut WorldBuilder<'_>, wall_type: &str) {
+pub(super) fn build_interior_walls(b: &mut WorldBuilder<'_>, wall_type: &str) {
     b.fill_rect(0, 0, b.w, 2, 4, wall_type, "none");
     b.fill_rect(0, 0, 2, b.h, 4, wall_type, "none");
 }

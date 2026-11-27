@@ -15,13 +15,39 @@ class StandalonePlayerApp {
       throw new Error("找不到內嵌的世界遊戲資料。");
     }
     this.bundle = bundle;
-    this.initialState = cloneJsonData(bundle.state);
+    this.entryWorldId = bundle.entryWorldId || bundle.state?.meta?.world_id || "default";
+    this.worldsById = new Map();
+    this.worldsByFile = new Map();
+
+    if (bundle.worlds && typeof bundle.worlds === "object") {
+      for (const [wid, entry] of Object.entries(bundle.worlds)) {
+        if (!entry?.state) continue;
+        this.worldsById.set(wid, entry);
+        if (entry.state.file_name) {
+          this.worldsByFile.set(entry.state.file_name, wid);
+        }
+      }
+    }
+    if (!this.worldsById.has(this.entryWorldId)) {
+      this.worldsById.set(this.entryWorldId, {
+        state: bundle.state,
+        bgmDataUrl: bundle.bgmDataUrl || null,
+      });
+      if (bundle.state.file_name) {
+        this.worldsByFile.set(bundle.state.file_name, this.entryWorldId);
+      }
+    }
+
+    this.currentWorldId = this.entryWorldId;
     this.worldState = cloneJsonData(bundle.state);
     this.currentWorldFile = this.worldState.meta?.file_name || "standalone.stackworld.db";
     this.assetMap = new Map();
     this.keysDown = new Set();
     this.cameraFollowPlayer = false;
     this._lastPlayerSaveMs = 0;
+    this.portalReturnStack = [];
+    this.sharedAdventure = null;
+    this._portalBusy = false;
 
     this.mouseState = {
       downBtn: -1,
@@ -36,14 +62,17 @@ class StandalonePlayerApp {
     this.glCanvas = document.getElementById("glCanvas");
     this.overlayCanvas = document.getElementById("overlayCanvas");
     this.renderer = new StackCityRenderer(this.glCanvas, this.overlayCanvas);
-    this.sim = new WorldSimulation(this.renderer, (kind) => {
+    this.sim = new WorldSimulation(this.renderer, (kind, val) => {
       if (kind === "time") this._updateTimeBadge(this.sim.timeOfDay);
+      else if (kind === "mount") this._syncMountBanner(val);
     });
     this.sim.visitorMode = true; // 鎖定為純玩家參觀／闖關模式
     this.quest = new QuestManager(this);
     this.sim.onEntityQuestInteract = (ent) => this.quest.openEncounterModal(ent);
     this.sim.onProximityCheck = (px, py, nowMs) => this.quest.checkProximityAmbush(px, py, nowMs);
     this.sim.getQuestBadge = (ent) => this.quest.getEntityBadge(ent);
+    this.sim.checkPortalLock = (portal) => this._checkPortalLock(portal);
+    this.sim.onPortalTrigger = (ent, portal) => this.handlePortalTransition(ent, portal);
 
     this._bindUi();
     this._bindCanvasControls();
@@ -64,8 +93,22 @@ class StandalonePlayerApp {
   }
 
   _storageKey() {
-    const wid = this.worldState?.meta?.world_id || "default";
-    return `stackcity_standalone_prog_${wid}`;
+    return `stackcity_standalone_proj_${this.entryWorldId}`;
+  }
+
+  _readSavedProject() {
+    try {
+      const raw = localStorage.getItem(this._storageKey());
+      return raw ? JSON.parse(raw) : {};
+    } catch {
+      return {};
+    }
+  }
+
+  _writeSavedProject(data) {
+    try {
+      localStorage.setItem(this._storageKey(), JSON.stringify(data));
+    } catch { /* ignore */ }
   }
 
   async _init() {
@@ -73,31 +116,51 @@ class StandalonePlayerApp {
       const ro = new ResizeObserver(() => this.renderer.resize());
       ro.observe(document.querySelector(".viewport-wrap"));
     }
-    await this._loadFromBundle(false);
-    this._startMainLoop();
+    try {
+      const saved = this._readSavedProject();
+      const startWorldId = saved.currentWorldId && this.worldsById.has(saved.currentWorldId)
+        ? saved.currentWorldId
+        : this.entryWorldId;
+      if (Array.isArray(saved.returnStack)) this.portalReturnStack = saved.returnStack;
+      if (saved.sharedAdventure) this.sharedAdventure = saved.sharedAdventure;
+      await this._loadWorldFromBundle(startWorldId, false, {
+        keepSharedAdventure: Boolean(saved.sharedAdventure),
+      });
+    } catch (err) {
+      console.error("獨立版初始化世界失敗：", err);
+      this.showToast(`載入世界發生錯誤：${err?.message || err}`, true);
+    } finally {
+      this._startMainLoop();
+    }
   }
 
-  async _loadFromBundle(ignoreSavedProgress = false) {
-    this.worldState = cloneJsonData(this.initialState);
+  async _loadWorldFromBundle(worldId, ignoreSavedProgress = false, opts = null) {
+    const entry = this.worldsById.get(worldId) || this.worldsById.get(this.entryWorldId);
+    if (!entry) return { portalVictoryPending: false };
+
+    const wasWalkMode = Boolean(opts?.preserveWalkMode && this.renderer.camera.walkMode);
+    const prevWalkYaw = this.renderer.camera.walkYaw;
+    const prevCamYaw = this.renderer.camera.yaw;
+
+    this.currentWorldId = worldId;
+    this.worldState = cloneJsonData(entry.state);
+    this.currentWorldFile = this.worldState.file_name || this.worldState.meta?.file_name || "standalone.stackworld.db";
+
     if (!ignoreSavedProgress) {
-      try {
-        const raw = localStorage.getItem(this._storageKey());
-        if (raw) {
-          const saved = JSON.parse(raw);
-          if (saved.quest_progress && this.worldState.meta) {
-            this.worldState.meta.quest_progress = saved.quest_progress;
-          }
-          if (typeof saved.player_x === "number" && this.worldState.meta) {
-            this.worldState.meta.player_x = saved.player_x;
-          }
-          if (typeof saved.player_y === "number" && this.worldState.meta) {
-            this.worldState.meta.player_y = saved.player_y;
-          }
-          if (typeof saved.player_asset_id === "string" && this.worldState.meta) {
-            this.worldState.meta.player_asset_id = saved.player_asset_id;
-          }
+      const savedProj = this._readSavedProject();
+      const saved = savedProj.perWorld?.[worldId];
+      if (saved && this.worldState.meta) {
+        if (saved.quest_progress) this.worldState.meta.quest_progress = saved.quest_progress;
+        if (typeof saved.player_x === "number" && !opts?.isPortalJump) {
+          this.worldState.meta.player_x = saved.player_x;
         }
-      } catch { /* 忽略 localStorage 讀取例外（例如無痕模式） */ }
+        if (typeof saved.player_y === "number" && !opts?.isPortalJump) {
+          this.worldState.meta.player_y = saved.player_y;
+        }
+        if (typeof saved.player_asset_id === "string") {
+          this.worldState.meta.player_asset_id = saved.player_asset_id;
+        }
+      }
     }
 
     const data = this.worldState;
@@ -117,6 +180,57 @@ class StandalonePlayerApp {
     this.sim.visitorMode = true;
     this.quest.loadWorld(data);
 
+    if (opts?.carryPlayerName) {
+      this.sim.player.name = opts.carryPlayerName;
+    }
+    if (opts?.carryAvatarSha || opts?.carryAvatarName) {
+      const matched =
+        (data.assets || []).find((a) => opts.carryAvatarSha && a.sha256 === opts.carryAvatarSha) ||
+        (data.assets || []).find((a) => opts.carryAvatarName && a.name === opts.carryAvatarName);
+      if (matched) {
+        this.sim.player.asset_id = matched.id;
+        this.sim.player.visible = true;
+        this.sim.applyPlayerScale(opts.carryPlayerScale ?? data.meta.player_scale ?? 1.0);
+      }
+    }
+
+    if (opts && (typeof opts.spawnX === "number" || opts.targetPortalId)) {
+      let prefX = typeof opts.spawnX === "number" ? opts.spawnX : this.sim.player.x;
+      let prefY = typeof opts.spawnY === "number" ? opts.spawnY : this.sim.player.y;
+      if (opts.targetPortalId && typeof opts.spawnX !== "number") {
+        const pairEnt = this.sim.entities.find((e) => e.id === opts.targetPortalId);
+        const pPos = pairEnt ? this.sim.getPortalWorldPos(pairEnt) : null;
+        if (pPos) {
+          prefX = pPos.x;
+          prefY = pPos.y;
+        }
+      }
+      const [sx, sy] = this.sim._findSafeLandPoint(prefX, prefY, false);
+      this.sim.player.x = sx;
+      this.sim.player.y = sy;
+      this.sim.player.z = 0;
+      if (typeof opts.spawnYaw === "number") {
+        this.sim.player.yaw = opts.spawnYaw;
+      }
+      const gz = this.renderer.getTerrainElevationAt(sx, sy);
+      this.renderer.camera.walkPos = [sx, sy, gz];
+      this.renderer.camera.target = [sx, sy, gz + 0.8];
+      this.cameraFollowPlayer = true;
+    }
+
+    if (wasWalkMode) {
+      this.renderer.camera.walkMode = true;
+      this.renderer.camera.walkYaw = prevWalkYaw;
+    } else if (opts?.isPortalJump) {
+      this.renderer.camera.yaw = prevCamYaw;
+    }
+
+    let portalVictoryPending = false;
+    if (opts?.keepSharedAdventure && this.sharedAdventure) {
+      const resSync = this.quest.applySharedAdventure(this.sharedAdventure);
+      portalVictoryPending = Boolean(resSync?.newlyCompleted);
+    }
+
     // 同步標頭資訊、BGM 與時間
     const titleEl = document.getElementById("standaloneWorldTitle");
     if (titleEl) {
@@ -127,7 +241,7 @@ class StandalonePlayerApp {
     this._updateTimeBadge(this.sim.timeOfDay);
 
     const preset = data.meta.bgm_preset || "kingdom";
-    const bgmDataUrl = this.bundle.bgmDataUrl || null;
+    const bgmDataUrl = entry.bgmDataUrl || null;
     soundEngine.configureBgm({
       preset,
       volume: data.meta.bgm_volume ?? 0.45,
@@ -135,8 +249,8 @@ class StandalonePlayerApp {
       customUrl: bgmDataUrl,
     });
 
-    // 若使用者未曾設過自訂造型視窗，預先建好造型清單
     this._renderAvatarPicker();
+    return { portalVictoryPending };
   }
 
   showToast(msg, isError = false) {
@@ -149,27 +263,156 @@ class StandalonePlayerApp {
     setTimeout(() => div.remove(), 3500);
   }
 
-  /// 純遊戲版本地進度儲存（寫入瀏覽器 localStorage，不存取任何編輯伺服器 API）
+  syncSharedAdventureFromQuest() {
+    if (this.quest) {
+      this.sharedAdventure = this.quest.exportSharedAdventure();
+    }
+  }
+
+  /// 純遊戲版本地進度儲存（寫入瀏覽器 localStorage，支援多世界分開紀錄與共享背包）
   async _patchWorldMeta(fields) {
     if (!this.worldState?.meta) return;
     Object.assign(this.worldState.meta, fields);
-    try {
-      const prevRaw = localStorage.getItem(this._storageKey());
-      const saved = prevRaw ? JSON.parse(prevRaw) : {};
-      if ("quest_progress" in fields) saved.quest_progress = fields.quest_progress;
-      if ("player_x" in fields) saved.player_x = fields.player_x;
-      if ("player_y" in fields) saved.player_y = fields.player_y;
-      if ("player_asset_id" in fields) saved.player_asset_id = fields.player_asset_id;
-      localStorage.setItem(this._storageKey(), JSON.stringify(saved));
-    } catch { /* ignore */ }
+    const savedProj = this._readSavedProject();
+    savedProj.currentWorldId = this.currentWorldId;
+    savedProj.returnStack = this.portalReturnStack;
+    if (this.sharedAdventure) savedProj.sharedAdventure = this.sharedAdventure;
+    savedProj.perWorld = savedProj.perWorld || {};
+    const cur = savedProj.perWorld[this.currentWorldId] || {};
+    if ("quest_progress" in fields) cur.quest_progress = fields.quest_progress;
+    if ("player_x" in fields) cur.player_x = fields.player_x;
+    if ("player_y" in fields) cur.player_y = fields.player_y;
+    if ("player_asset_id" in fields) cur.player_asset_id = fields.player_asset_id;
+    savedProj.perWorld[this.currentWorldId] = cur;
+    this._writeSavedProject(savedProj);
   }
 
   async resetGameProgress(_mode = "progress_only") {
     try {
       localStorage.removeItem(this._storageKey());
     } catch { /* ignore */ }
-    await this._loadFromBundle(true);
+    this.portalReturnStack = [];
+    this.sharedAdventure = null;
+    await this._loadWorldFromBundle(this.entryWorldId, true, null);
     this.showToast("✨ 已重置遊玩進度並回到關卡起點，祝你挑戰成功！");
+  }
+
+  _checkPortalLock(portal) {
+    if (!portal) return { locked: false };
+    const reqItem = (portal.required_item || "").trim();
+    const reqFlag = (portal.required_flag || "").trim();
+    if (reqItem && !this.quest.hasItem(reqItem)) {
+      return {
+        locked: true,
+        reason: portal.locked_text || `門上鎖了！需要「${reqItem}」才能進入。`,
+      };
+    }
+    if (reqFlag && !this.quest.hasFlag(reqFlag)) {
+      return {
+        locked: true,
+        reason: portal.locked_text || "尚未達成開門條件，目前無法進入！",
+      };
+    }
+    return { locked: false };
+  }
+
+  async handlePortalTransition(ent, portal) {
+    if (this._portalBusy || !portal) return;
+    this._portalBusy = true;
+    const overlay = document.getElementById("portalTransition");
+    const overlayText = document.getElementById("portalTransitionText");
+    try {
+      this.syncSharedAdventureFromQuest();
+      await this.quest.persistProgress(true);
+      this.keysDown.clear();
+
+      const curAsset = this.sim.player.asset_id ? this.assetMap.get(this.sim.player.asset_id) : null;
+      const carryAvatarSha = curAsset?.sha256 || null;
+      const carryAvatarName = curAsset?.name || null;
+      const carryPlayerName = this.sim.player.name;
+      const carryPlayerScale = this.worldState?.meta?.player_scale ?? 1.0;
+
+      let targetWorldId = null;
+      let spawnX = typeof portal.target_x === "number" ? portal.target_x : null;
+      let spawnY = typeof portal.target_y === "number" ? portal.target_y : null;
+      let spawnYaw = typeof portal.target_yaw === "number" ? portal.target_yaw : undefined;
+      let targetPortalId = portal.target_portal_id || null;
+
+      if (portal.kind === "exit" && this.portalReturnStack.length > 0) {
+        const ret = this.portalReturnStack.pop();
+        if (ret.worldId && this.worldsById.has(ret.worldId)) {
+          targetWorldId = ret.worldId;
+        } else if (ret.fileName && this.worldsByFile.has(ret.fileName)) {
+          targetWorldId = this.worldsByFile.get(ret.fileName);
+        }
+        if (typeof ret.x === "number") spawnX = ret.x;
+        if (typeof ret.y === "number") spawnY = ret.y;
+        if (typeof ret.yaw === "number") spawnYaw = ret.yaw;
+      } else {
+        if (portal.target_world_id && this.worldsById.has(portal.target_world_id)) {
+          targetWorldId = portal.target_world_id;
+        } else if (portal.target_world_file && this.worldsByFile.has(portal.target_world_file)) {
+          targetWorldId = this.worldsByFile.get(portal.target_world_file);
+        }
+        if (targetWorldId && portal.kind !== "exit") {
+          const doorPos = this.sim.getPortalWorldPos(ent, portal) || { x: this.sim.player.x, y: this.sim.player.y };
+          const yawRad = ((ent.yaw || 0) * Math.PI) / 180;
+          const pushX = doorPos.x + (-Math.sin(yawRad)) * 0.45;
+          const pushY = doorPos.y + Math.cos(yawRad) * 0.45;
+          const [safeRetX, safeRetY] = this.sim._findSafeLandPoint(pushX, pushY, false);
+          this.portalReturnStack.push({
+            worldId: this.currentWorldId,
+            fileName: this.currentWorldFile,
+            x: safeRetX,
+            y: safeRetY,
+            yaw: ((ent.yaw || 0) + 180) % 360,
+          });
+        }
+      }
+
+      if (!targetWorldId || !this.worldsById.has(targetWorldId)) {
+        return this.showToast("此門目前尚未連結到可進入的世界！", true);
+      }
+
+      const targetEntry = this.worldsById.get(targetWorldId);
+      if (overlayText) {
+        overlayText.textContent = portal.kind === "exit"
+          ? `🚪 正在返回「${targetEntry?.state?.meta?.name || "原世界"}」...`
+          : `🚪 正在進入「${targetEntry?.state?.meta?.name || "目標世界"}」...`;
+      }
+      overlay?.classList.add("active");
+      await new Promise((r) => setTimeout(r, 210));
+
+      const loadRes = await this._loadWorldFromBundle(targetWorldId, false, {
+        spawnX,
+        spawnY,
+        spawnYaw,
+        targetPortalId,
+        preserveWalkMode: true,
+        isPortalJump: true,
+        keepSharedAdventure: true,
+        carryAvatarSha,
+        carryAvatarName,
+        carryPlayerName,
+        carryPlayerScale,
+      });
+
+      const savedProj = this._readSavedProject();
+      savedProj.currentWorldId = this.currentWorldId;
+      savedProj.returnStack = this.portalReturnStack;
+      if (this.sharedAdventure) savedProj.sharedAdventure = this.sharedAdventure;
+      this._writeSavedProject(savedProj);
+
+      await new Promise((r) => setTimeout(r, 140));
+      overlay?.classList.remove("active");
+
+      if (loadRes?.portalVictoryPending) {
+        setTimeout(() => this.quest.triggerVictory(), 280);
+      }
+    } finally {
+      overlay?.classList.remove("active");
+      this._portalBusy = false;
+    }
   }
 
   // 以下提供空實作／本地化對應方法以完整相容 QuestManager 呼叫
@@ -185,6 +428,30 @@ class StandalonePlayerApp {
     const h = Math.floor(t) % 24;
     const m = Math.floor((t - Math.floor(t)) * 60);
     el.textContent = `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+  }
+
+  _syncMountBanner(state) {
+    const banner = document.getElementById("mountBanner");
+    const txt = document.getElementById("mountBannerText");
+    const swBtn = document.getElementById("btnMountSwitchMode");
+    if (!banner || !txt) return;
+    if (!state || !state.entity) {
+      banner.classList.add("hidden");
+      return;
+    }
+    const icon = this.sim._getMountIcon(state.entity, state.config);
+    const modeLbl = state.controlMode === "passenger" ? "自動巡航乘客" : "親自駕駛";
+    let hint = state.controlMode === "passenger"
+      ? "沿既定路線巡航中・按 G 隨時下車"
+      : "WASD 控制移動・按 G 下車";
+    if (state.controlMode === "drive" && state.config?.mobility === "air") {
+      hint = "WASD 飛行・空白鍵上升・Shift/C 下降・按 G 降落";
+    } else if (state.controlMode === "drive" && state.config?.mobility === "water") {
+      hint = "WASD 航行・空白鍵鳴笛・靠近岸邊按 G 下船";
+    }
+    txt.textContent = `${icon} ${state.entity.name}（${modeLbl}）｜${hint}`;
+    if (swBtn) swBtn.classList.toggle("hidden", !state.canSwitchMode);
+    banner.classList.remove("hidden");
   }
 
   _bindUi() {
@@ -220,6 +487,8 @@ class StandalonePlayerApp {
 
     document.getElementById("btnCityWalk")?.addEventListener("click", () => this._toggleWalkMode());
     document.getElementById("btnExitWalk")?.addEventListener("click", () => this._toggleWalkMode(false));
+    document.getElementById("btnMountSwitchMode")?.addEventListener("click", () => this.sim.toggleMountControlMode());
+    document.getElementById("btnMountDismount")?.addEventListener("click", () => this.sim.dismountPlayer(false));
 
     document.getElementById("btnPlayerAvatar")?.addEventListener("click", () => {
       this._renderAvatarPicker();
@@ -434,9 +703,24 @@ class StandalonePlayerApp {
         e.preventDefault();
         this.sim.interactNearestToPlayer(2.8);
       }
+      if (lower === "g" && this.sim.player.visible && !this.renderer.camera.followEntityId) {
+        e.preventDefault();
+        const res = this.sim.toggleMountNearest();
+        if (res.ok && res.vehicle) this.cameraFollowPlayer = true;
+      }
+      if (lower === "tab" && this.sim.player.mountedEntityId) {
+        e.preventDefault();
+        this.sim.toggleMountControlMode();
+      }
       if (e.key === " " && this.sim.player.visible && !this.mouseState.isPanning) {
         e.preventDefault();
-        this.sim.jumpPlayer();
+        const isAirDrive =
+          this.sim.player.mountedEntityId &&
+          this.sim.player.mountControlMode === "drive" &&
+          this.sim.player.mountConfig?.mobility === "air";
+        if (!isAirDrive) {
+          this.sim.jumpPlayer();
+        }
       }
     });
     window.addEventListener("keyup", (e) => {
@@ -458,6 +742,12 @@ class StandalonePlayerApp {
     if (k.has("s") || k.has("arrowdown")) fwd -= 1;
     if (k.has("a") || k.has("arrowleft")) strafe -= 1;
     if (k.has("d") || k.has("arrowright")) strafe += 1;
+
+    // 駕駛飛行載具時：空白鍵上升、Shift/C 鍵下降
+    if (pl.mountedEntityId && pl.mountControlMode === "drive" && pl.mountConfig?.mobility === "air") {
+      if (k.has(" ")) this.sim.adjustMountedAltitude(1, dt);
+      if (k.has("shift") || k.has("c")) this.sim.adjustMountedAltitude(-1, dt);
+    }
 
     if (cam.walkMode && !cam.followEntityId) {
       if (k.has("q")) cam.walkYaw -= 1.6 * dt;
@@ -504,12 +794,12 @@ class StandalonePlayerApp {
       pl.moving = false;
     }
 
-    if (!cam.walkMode && this.cameraFollowPlayer && pl.visible) {
+    if (!cam.walkMode && (this.cameraFollowPlayer || pl.mountedEntityId) && pl.visible) {
       const gz = this.renderer.getTerrainElevationAt(pl.x, pl.y);
       const followRate = Math.min(1, dt * 6.5);
       cam.target[0] += (pl.x - cam.target[0]) * followRate;
       cam.target[1] += (pl.y - cam.target[1]) * followRate;
-      cam.target[2] += (gz + 0.8 - cam.target[2]) * followRate;
+      cam.target[2] += (gz + (pl.z || 0) + 0.8 - cam.target[2]) * followRate;
     }
   }
 

@@ -51,6 +51,9 @@ class StackCityApp {
     this._lastPlayerSaveMs = 0;
     this._playerBusy = false;
     this.cameraFollowPlayer = false;
+    this.portalReturnStack = [];
+    this.sharedAdventure = null;
+    this._portalBusy = false;
 
     this.leftCollapsed = false;
     this.rightCollapsed = false;
@@ -77,6 +80,8 @@ class StackCityApp {
     this.sim.onEntityQuestInteract = (ent) => this.quest.openEncounterModal(ent);
     this.sim.onProximityCheck = (px, py, nowMs) => this.quest.checkProximityAmbush(px, py, nowMs);
     this.sim.getQuestBadge = (ent) => this.quest.getEntityBadge(ent);
+    this.sim.checkPortalLock = (portal) => this._checkPortalLock(portal);
+    this.sim.onPortalTrigger = (ent, portal) => this.handlePortalTransition(ent, portal);
     this.tools = new ToolController(this);
     this.studio = new CreationStudio({
       getWorldFile: () => this.currentWorldFile,
@@ -108,11 +113,17 @@ class StackCityApp {
       const ro = new ResizeObserver(() => this.renderer.resize());
       ro.observe(document.querySelector(".viewport-wrap"));
     }
-    await this.refreshWorldList();
-    if (this.worlds.length > 0) {
-      await this.loadWorld(this.worlds[0].file_name);
+    try {
+      await this.refreshWorldList();
+      if (this.worlds.length > 0) {
+        await this.loadWorld(this.worlds[0].file_name);
+      }
+    } catch (err) {
+      console.error("初始化世界失敗：", err);
+      this.showToast(`初始化發生錯誤：${err?.message || err}`, true);
+    } finally {
+      this._startMainLoop();
     }
-    this._startMainLoop();
   }
 
   showToast(msg, isError = false) {
@@ -139,13 +150,17 @@ class StackCityApp {
     if (this.currentWorldFile) sel.value = this.currentWorldFile;
   }
 
-  async loadWorld(fileName) {
+  async loadWorld(fileName, opts = null) {
     const res = await fetch(`/api/worlds/${encodeURIComponent(fileName)}/state`);
     const data = await res.json();
     if (!res.ok) {
       this.showToast(data.error || "載入世界失敗", true);
-      return;
+      return null;
     }
+    const wasWalkMode = Boolean(opts?.preserveWalkMode && this.renderer.camera.walkMode);
+    const prevWalkYaw = this.renderer.camera.walkYaw;
+    const prevCamYaw = this.renderer.camera.yaw;
+
     this.currentWorldFile = fileName;
     this.worldState = data;
     document.getElementById("worldSelect").value = fileName;
@@ -165,6 +180,60 @@ class StackCityApp {
 
     this.sim.loadState(data, this.assetMap);
     this.quest.loadWorld(data);
+
+    // 跨世界攜帶玩家角色外觀與暱稱
+    if (opts?.carryPlayerName) {
+      this.sim.player.name = opts.carryPlayerName;
+    }
+    if (opts?.carryAvatarSha || opts?.carryAvatarName) {
+      const matched =
+        data.assets.find((a) => opts.carryAvatarSha && a.sha256 === opts.carryAvatarSha) ||
+        data.assets.find((a) => opts.carryAvatarName && a.name === opts.carryAvatarName);
+      if (matched) {
+        this.sim.player.asset_id = matched.id;
+        this.sim.player.visible = true;
+        this.sim.applyPlayerScale(opts.carryPlayerScale ?? data.meta.player_scale ?? 1.0);
+      }
+    }
+
+    // 跨世界門落點定位（避免卡在門本體／牆體內）
+    if (opts && (typeof opts.spawnX === "number" || opts.targetPortalId)) {
+      let prefX = typeof opts.spawnX === "number" ? opts.spawnX : this.sim.player.x;
+      let prefY = typeof opts.spawnY === "number" ? opts.spawnY : this.sim.player.y;
+      if (opts.targetPortalId && typeof opts.spawnX !== "number") {
+        const pairEnt = this.sim.entities.find((e) => e.id === opts.targetPortalId);
+        const pPos = pairEnt ? this.sim.getPortalWorldPos(pairEnt) : null;
+        if (pPos) {
+          prefX = pPos.x;
+          prefY = pPos.y;
+        }
+      }
+      const [sx, sy] = this.sim._findSafeLandPoint(prefX, prefY, false);
+      this.sim.player.x = sx;
+      this.sim.player.y = sy;
+      this.sim.player.z = 0;
+      if (typeof opts.spawnYaw === "number") {
+        this.sim.player.yaw = opts.spawnYaw;
+      }
+      const gz = this.renderer.getTerrainElevationAt(sx, sy);
+      this.renderer.camera.walkPos = [sx, sy, gz];
+      this.renderer.camera.target = [sx, sy, gz + 0.8];
+      this.cameraFollowPlayer = true;
+    }
+
+    if (wasWalkMode) {
+      this.renderer.camera.walkMode = true;
+      this.renderer.camera.walkYaw = prevWalkYaw;
+    } else if (opts?.isPortalJump) {
+      this.renderer.camera.yaw = prevCamYaw;
+    }
+
+    let portalVictoryPending = false;
+    if (opts?.keepSharedAdventure && this.sharedAdventure) {
+      const resSync = this.quest.applySharedAdventure(this.sharedAdventure);
+      portalVictoryPending = Boolean(resSync?.newlyCompleted);
+    }
+
     this.eventDraft = null;
     this.cancelRemoveWorldAsset();
     if (!this.selectedAssetId || !this.assetMap.has(this.selectedAssetId)) {
@@ -176,6 +245,7 @@ class StackCityApp {
     this.renderAssetGrid();
     this.renderRightPanel();
     this.tools.renderSubOptions();
+    return { portalVictoryPending };
   }
 
   _updateBgmStyleInfo(preset) {
@@ -238,6 +308,8 @@ class StackCityApp {
     window.addEventListener("keydown", unlockOnce);
 
     document.getElementById("worldSelect").addEventListener("change", (e) => {
+      this.portalReturnStack = [];
+      this.sharedAdventure = null;
       this.loadWorld(e.target.value);
     });
 
@@ -321,6 +393,8 @@ class StackCityApp {
     // 相機與漫步模式
     document.getElementById("btnCityWalk").addEventListener("click", () => this.toggleCityWalk(null));
     document.getElementById("btnExitWalk").addEventListener("click", () => this.toggleCityWalk(null));
+    document.getElementById("btnMountSwitchMode")?.addEventListener("click", () => this.sim.toggleMountControlMode());
+    document.getElementById("btnMountDismount")?.addEventListener("click", () => this.sim.dismountPlayer(false));
     document.getElementById("btnResetCam").addEventListener("click", () => {
       this.cameraFollowPlayer = false;
       this.renderer.resetCamera();
@@ -541,7 +615,7 @@ class StackCityApp {
     document.getElementById("btnCancelRemoveWorldAsset")?.addEventListener("click", () => this.cancelRemoveWorldAsset());
     document.getElementById("btnConfirmRemoveWorldAsset")?.addEventListener("click", () => this.confirmRemoveWorldAsset());
 
-    // 新建主題世界（支援 12 種戶外與建築內部場景）
+    // 新建主題世界（支援 5 世界聯動企劃 + 12 種戶外與建築內部場景）
     let chosenTheme = "kingdom";
     document.getElementById("btnNewWorld").addEventListener("click", () => {
       document.getElementById("newWorldModal").classList.remove("hidden");
@@ -551,6 +625,15 @@ class StackCityApp {
         document.querySelectorAll("#newWorldModal .theme-card").forEach((c) => c.classList.remove("active"));
         card.classList.add("active");
         chosenTheme = card.dataset.theme;
+        const nameInp = document.getElementById("nwNameInput");
+        if (nameInp) {
+          const cur = nameInp.value.trim();
+          if (chosenTheme === "office_worker_day" && (!cur || cur === "我的夢幻新世界")) {
+            nameInp.value = "社畜的一天";
+          } else if (chosenTheme !== "office_worker_day" && cur === "社畜的一天") {
+            nameInp.value = "我的夢幻新世界";
+          }
+        }
       });
     });
     document.getElementById("btnConfirmNewWorld").addEventListener("click", async () => {
@@ -564,41 +647,76 @@ class StackCityApp {
       const data = await res.json();
       if (!res.ok) return this.showToast(data.error || "建立失敗", true);
       document.getElementById("newWorldModal").classList.add("hidden");
+      if (data.is_campaign) {
+        this.portalReturnStack = [];
+        this.sharedAdventure = null;
+      }
       await this.refreshWorldList();
       await this.loadWorld(data.world.file_name);
-      this.showToast(`世界「${data.world.name}」已建置完成！`);
+      this.showToast(
+        data.is_campaign
+          ? `🎉 已一次建置《${name}》${data.count || 5} 座聯動世界（住家・公車都市・辦公室・大賣場・餐廳）！`
+          : `世界「${data.world.name}」已建置完成！`,
+      );
     });
 
-    // 好友分享（方式一：完整分享 .stackworld.db ＋ 方式二：單純遊戲 .html ＋ 匯入）
-    document.getElementById("btnShareWorld").addEventListener("click", () => {
+    // 好友分享（單一世界 .stackworld.db ＋ 多世界 .stackpack.zip ＋ 獨立遊戲 .html ＋ 匯入）
+    document.getElementById("btnShareWorld").addEventListener("click", async () => {
       const prevLink = document.getElementById("btnPreviewPlayHtml");
       if (prevLink && this.currentWorldFile) {
         prevLink.href = `/api/worlds/${encodeURIComponent(this.currentWorldFile)}/export-html?preview=1`;
+      }
+      const infoEl = document.getElementById("shareLinkedInfo");
+      if (infoEl && this.currentWorldFile) {
+        infoEl.textContent = "🔍 正在檢查門連結的關聯世界...";
+        try {
+          const r = await fetch(`/api/worlds/${encodeURIComponent(this.currentWorldFile)}/linked-worlds`);
+          const d = await r.json();
+          if (r.ok && Array.isArray(d.worlds)) {
+            const names = d.worlds.map((w) => w.name).join("、");
+            infoEl.textContent = d.count > 1
+              ? `🔗 偵測到「門」聯動專案（共 ${d.count} 座世界：${names}），匯出 .html 與 .stackpack.zip 將自動全部打包！`
+              : `🌍 目前為單一獨立世界（未連結其他門世界），可直接匯出分享。`;
+          }
+        } catch {
+          infoEl.textContent = "🌍 準備好匯出或匯入世界專案！";
+        }
       }
       document.getElementById("shareModal").classList.remove("hidden");
     });
     document.getElementById("btnExportWorldDb").addEventListener("click", () => {
       if (!this.currentWorldFile) return;
       window.location.href = `/api/worlds/${encodeURIComponent(this.currentWorldFile)}/export`;
-      this.showToast("已開始打包下載完整分享檔（.stackworld.db）！");
+      this.showToast("已開始打包下載單一世界檔（.stackworld.db）！");
+    });
+    document.getElementById("btnExportWorldPack")?.addEventListener("click", () => {
+      if (!this.currentWorldFile) return;
+      window.location.href = `/api/worlds/${encodeURIComponent(this.currentWorldFile)}/export-pack`;
+      this.showToast("正在打包所有透過「門」相連的多世界編輯包（.stackpack.zip）！");
     });
     document.getElementById("btnExportPlayHtml")?.addEventListener("click", () => {
       if (!this.currentWorldFile) return;
       window.location.href = `/api/worlds/${encodeURIComponent(this.currentWorldFile)}/export-html`;
-      this.showToast("正在產生單純遊戲網頁檔（.html），好友開啟即可直接遊玩！");
+      this.showToast("正在產生單純遊戲網頁檔（.html），好友開啟即可直接跨世界遊玩！");
     });
     document.getElementById("btnImportWorldDb").addEventListener("click", async () => {
       const f = document.getElementById("importWorldFile").files?.[0];
-      if (!f) return this.showToast("請選擇好友分享的 .stackworld.db 檔案", true);
+      if (!f) return this.showToast("請選擇好友分享的 .stackworld.db 或 .stackpack.zip 檔案", true);
       const fd = new FormData();
       fd.append("file", f);
       const res = await fetch("/api/worlds/import", { method: "POST", body: fd });
       const data = await res.json();
       if (!res.ok) return this.showToast(data.error || "匯入失敗", true);
       document.getElementById("shareModal").classList.add("hidden");
+      this.portalReturnStack = [];
+      this.sharedAdventure = null;
       await this.refreshWorldList();
       await this.loadWorld(data.world.file_name);
-      this.showToast(`已成功匯入好友的世界「${data.world.name}」！`);
+      this.showToast(
+        data.is_pack
+          ? `已成功匯入多世界編輯包（共 ${data.count} 座聯動世界）並開啟「${data.world.name}」！`
+          : `已成功匯入好友的世界「${data.world.name}」！`,
+      );
     });
 
     // 快照與重置／刪除世界管理
@@ -807,9 +925,24 @@ class StackCityApp {
         e.preventDefault();
         this.sim.interactNearestToPlayer(2.8);
       }
+      if (lower === "g" && this.sim.player.visible && !this.renderer.camera.followEntityId) {
+        e.preventDefault();
+        const res = this.sim.toggleMountNearest();
+        if (res.ok && res.vehicle) this.cameraFollowPlayer = true;
+      }
+      if (lower === "tab" && this.sim.player.mountedEntityId) {
+        e.preventDefault();
+        this.sim.toggleMountControlMode();
+      }
       if (e.key === " " && this.sim.player.visible && !this.mouseState.isPanning) {
         e.preventDefault();
-        this.sim.jumpPlayer();
+        const isAirDrive =
+          this.sim.player.mountedEntityId &&
+          this.sim.player.mountControlMode === "drive" &&
+          this.sim.player.mountConfig?.mobility === "air";
+        if (!isAirDrive) {
+          this.sim.jumpPlayer();
+        }
       }
       if (e.key === "Delete" && this.renderer.selectedEntityId && !this.sim.visitorMode) {
         this.deleteEntityById(this.renderer.selectedEntityId);
@@ -1209,6 +1342,8 @@ class StackCityApp {
     if (!res.ok) {
       return this.showToast(data.error || "重置世界失敗", true);
     }
+    this.sharedAdventure = null;
+    this.portalReturnStack = [];
     document.getElementById("resetModal")?.classList.add("hidden");
     document.getElementById("victoryModal")?.classList.add("hidden");
     document.getElementById("encounterModal")?.classList.add("hidden");
@@ -1218,6 +1353,160 @@ class StackCityApp {
         ? "已徹底回復此世界的初始出廠狀態！"
         : "已清除遊玩進度、積分與筆記，祝您挑戰順利！",
     );
+  }
+
+  /// 從 QuestManager 即時同步跨世界冒險背包與積分快照
+  syncSharedAdventureFromQuest() {
+    if (this.quest) {
+      this.sharedAdventure = this.quest.exportSharedAdventure();
+    }
+  }
+
+  /// 檢查門 (`portal`) 是否有道具或旗標上鎖條件
+  _checkPortalLock(portal) {
+    if (!portal) return { locked: false };
+    const reqItem = (portal.required_item || "").trim();
+    const reqFlag = (portal.required_flag || "").trim();
+    if (reqItem && !this.quest.hasItem(reqItem)) {
+      return {
+        locked: true,
+        reason: portal.locked_text || `門上鎖了！需要「${reqItem}」才能進入。`,
+      };
+    }
+    if (reqFlag && !this.quest.hasFlag(reqFlag)) {
+      return {
+        locked: true,
+        reason: portal.locked_text || "尚未達成開門條件，目前無法進入！",
+      };
+    }
+    return { locked: false };
+  }
+
+  /// 一鍵為指定建築物／門建立全新室內世界並雙向連結
+  async quickLinkInteriorWorld(entity, theme, name) {
+    if (!this.currentWorldFile || !entity) return;
+    const res = await fetch(
+      `/api/worlds/${encodeURIComponent(this.currentWorldFile)}/entities/${encodeURIComponent(entity.id)}/link-interior`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ theme, name }),
+      },
+    );
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      return this.showToast(data.error || "建立室內世界連結失敗", true);
+    }
+    if (data.source_entity) {
+      const idx = this.sim.entities.findIndex((e) => e.id === entity.id);
+      if (idx !== -1) Object.assign(this.sim.entities[idx], data.source_entity);
+      Object.assign(entity, data.source_entity);
+    }
+    await this.refreshWorldList();
+    this.renderRightPanel();
+    const intName = data.interior_world?.name || name;
+    this.showToast(`已建立室內世界「${intName}」並完成雙向門連結！按 F 或點擊「立即進門前往」即可進入！`);
+  }
+
+  /// 執行跨世界進門／出門轉場，保留玩家造型並同步共享冒險進度
+  async handlePortalTransition(ent, portal) {
+    if (this._portalBusy || !portal) return;
+    this._portalBusy = true;
+    const overlay = document.getElementById("portalTransition");
+    const overlayText = document.getElementById("portalTransitionText");
+
+    try {
+      this.syncSharedAdventureFromQuest();
+      await this.quest.persistProgress(true);
+      this.keysDown.clear();
+
+      const curAsset = this.sim.player.asset_id ? this.assetMap.get(this.sim.player.asset_id) : null;
+      const carryAvatarSha = curAsset?.sha256 || null;
+      const carryAvatarName = curAsset?.name || null;
+      const carryPlayerName = this.sim.player.name;
+      const carryPlayerScale = this.worldState?.meta?.player_scale ?? 1.0;
+
+      let targetFile = null;
+      let spawnX = typeof portal.target_x === "number" ? portal.target_x : null;
+      let spawnY = typeof portal.target_y === "number" ? portal.target_y : null;
+      let spawnYaw = typeof portal.target_yaw === "number" ? portal.target_yaw : undefined;
+      let targetPortalId = portal.target_portal_id || null;
+
+      const curWorldId = this.worldState?.meta?.world_id;
+
+      if (portal.kind === "exit" && this.portalReturnStack.length > 0) {
+        const ret = this.portalReturnStack.pop();
+        const matchById = ret.worldId && this.worlds.find((w) => w.world_id === ret.worldId);
+        const matchByFile = ret.fileName && this.worlds.find((w) => w.file_name === ret.fileName);
+        targetFile = (matchById || matchByFile)?.file_name || null;
+        if (typeof ret.x === "number") spawnX = ret.x;
+        if (typeof ret.y === "number") spawnY = ret.y;
+        if (typeof ret.yaw === "number") spawnYaw = ret.yaw;
+      } else {
+        if (!this.worlds.length) await this.refreshWorldList();
+        const findTarget = () =>
+          (portal.target_world_id && this.worlds.find((w) => w.world_id === portal.target_world_id)) ||
+          (portal.target_world_file && this.worlds.find((w) => w.file_name === portal.target_world_file));
+        let found = findTarget();
+        if (!found) {
+          await this.refreshWorldList();
+          found = findTarget();
+        }
+        targetFile = found?.file_name || null;
+
+        if (targetFile && portal.kind !== "exit") {
+          const doorPos = this.sim.getPortalWorldPos(ent, portal) || { x: this.sim.player.x, y: this.sim.player.y };
+          const yawRad = ((ent.yaw || 0) * Math.PI) / 180;
+          const pushX = doorPos.x + (-Math.sin(yawRad)) * 0.45;
+          const pushY = doorPos.y + Math.cos(yawRad) * 0.45;
+          const [safeRetX, safeRetY] = this.sim._findSafeLandPoint(pushX, pushY, false);
+          this.portalReturnStack.push({
+            worldId: curWorldId,
+            fileName: this.currentWorldFile,
+            x: safeRetX,
+            y: safeRetY,
+            yaw: ((ent.yaw || 0) + 180) % 360,
+          });
+        }
+      }
+
+      if (!targetFile) {
+        return this.showToast("找不到門連結的目標世界（可能已被刪除或尚未設定目標世界）。", true);
+      }
+
+      const targetMeta = this.worlds.find((w) => w.file_name === targetFile);
+      if (overlayText) {
+        overlayText.textContent = portal.kind === "exit"
+          ? `🚪 正在返回「${targetMeta?.name || "原世界"}」...`
+          : `🚪 正在進入「${targetMeta?.name || "目標世界"}」...`;
+      }
+      overlay?.classList.add("active");
+      await new Promise((r) => setTimeout(r, 210));
+
+      const loadRes = await this.loadWorld(targetFile, {
+        spawnX,
+        spawnY,
+        spawnYaw,
+        targetPortalId,
+        preserveWalkMode: true,
+        isPortalJump: true,
+        keepSharedAdventure: true,
+        carryAvatarSha,
+        carryAvatarName,
+        carryPlayerName,
+        carryPlayerScale,
+      });
+
+      await new Promise((r) => setTimeout(r, 140));
+      overlay?.classList.remove("active");
+
+      if (loadRes?.portalVictoryPending) {
+        setTimeout(() => this.quest.triggerVictory(), 280);
+      }
+    } finally {
+      overlay?.classList.remove("active");
+      this._portalBusy = false;
+    }
   }
 
   async commitDraftPath() {
@@ -1482,15 +1771,21 @@ class StackCityApp {
 
   renderRightPanel() {
     const body = document.getElementById("rightPanelBody");
-    if (this.activeRightTab === "inspector") {
-      const sel = this.sim.entities.find((e) => e.id === this.renderer.selectedEntityId) || null;
-      this.tools.renderInspector(body, sel);
-    } else if (this.activeRightTab === "motion") {
-      renderMotionPanel(body, this);
-    } else if (this.activeRightTab === "events") {
-      renderEventsPanel(body, this);
-    } else {
-      this.quest.renderQuestPlannerPanel(body);
+    if (!body) return;
+    try {
+      if (this.activeRightTab === "inspector") {
+        const sel = this.sim.entities.find((e) => e.id === this.renderer.selectedEntityId) || null;
+        this.tools.renderInspector(body, sel);
+      } else if (this.activeRightTab === "motion") {
+        renderMotionPanel(body, this);
+      } else if (this.activeRightTab === "events") {
+        renderEventsPanel(body, this);
+      } else {
+        this.quest.renderQuestPlannerPanel(body);
+      }
+    } catch (err) {
+      console.error("繪製右側面板發生錯誤：", err);
+      body.innerHTML = `<div class="prop-card"><strong>面板載入錯誤</strong><p class="hint-text">${escapeHtml(err?.message || String(err))}</p></div>`;
     }
   }
 
@@ -1638,8 +1933,33 @@ class StackCityApp {
     }
   }
 
-  _handleSimUiSync(kind) {
+  _handleSimUiSync(kind, val) {
     if (kind === "weather" || kind === "time") this._syncTimeAndWeatherUi();
+    else if (kind === "mount") this._syncMountBanner(val);
+  }
+
+  _syncMountBanner(state) {
+    const banner = document.getElementById("mountBanner");
+    const txt = document.getElementById("mountBannerText");
+    const swBtn = document.getElementById("btnMountSwitchMode");
+    if (!banner || !txt) return;
+    if (!state || !state.entity) {
+      banner.classList.add("hidden");
+      return;
+    }
+    const icon = this.sim._getMountIcon(state.entity, state.config);
+    const modeLbl = state.controlMode === "passenger" ? "自動巡航乘客" : "親自駕駛";
+    let hint = state.controlMode === "passenger"
+      ? "沿既定路線巡航中・按 G 隨時下車"
+      : "WASD 控制移動・按 G 下車";
+    if (state.controlMode === "drive" && state.config?.mobility === "air") {
+      hint = "WASD 飛行・空白鍵上升・Shift/C 下降・按 G 降落";
+    } else if (state.controlMode === "drive" && state.config?.mobility === "water") {
+      hint = "WASD 航行・空白鍵鳴笛・靠近岸邊按 G 下船";
+    }
+    txt.textContent = `${icon} ${state.entity.name}（${modeLbl}）｜${hint}`;
+    if (swBtn) swBtn.classList.toggle("hidden", !state.canSwitchMode);
+    banner.classList.remove("hidden");
   }
 
   _syncTimeAndWeatherUi() {
@@ -1691,6 +2011,12 @@ class StackCityApp {
     if (k.has("a") || k.has("arrowleft")) strafe -= 1;
     if (k.has("d") || k.has("arrowright")) strafe += 1;
 
+    // 駕駛飛行載具時：空白鍵上升、Shift/C 鍵下降
+    if (pl.mountedEntityId && pl.mountControlMode === "drive" && pl.mountConfig?.mobility === "air") {
+      if (k.has(" ")) this.sim.adjustMountedAltitude(1, dt);
+      if (k.has("shift") || k.has("c")) this.sim.adjustMountedAltitude(-1, dt);
+    }
+
     if (cam.walkMode && !cam.followEntityId) {
       if (k.has("q")) cam.walkYaw -= 1.6 * dt;
       if (k.has("e")) cam.walkYaw += 1.6 * dt;
@@ -1721,7 +2047,7 @@ class StackCityApp {
       return;
     }
 
-    // 上帝視角：Q/E 旋轉視角；WASD / 方向鍵直接操控玩家角色並柔和跟隨鏡頭！
+    // 上帝視角：Q/E 旋轉視角；WASD / 方向鍵直接操控玩家角色或所駕駛的載具並柔和跟隨鏡頭！
     if (k.has("q")) cam.yaw -= 1.6 * dt;
     if (k.has("e")) cam.yaw += 1.6 * dt;
 
@@ -1750,13 +2076,13 @@ class StackCityApp {
       pl.moving = false;
     }
 
-    // 柔和將上帝視角鏡頭目標跟向移動中的玩家角色
-    if (!cam.walkMode && this.cameraFollowPlayer && pl.visible) {
+    // 柔和將上帝視角鏡頭目標跟向移動中或搭乘中的玩家角色
+    if (!cam.walkMode && (this.cameraFollowPlayer || pl.mountedEntityId) && pl.visible) {
       const gz = this.renderer.getTerrainElevationAt(pl.x, pl.y);
       const followRate = Math.min(1, dt * 6.5);
       cam.target[0] += (pl.x - cam.target[0]) * followRate;
       cam.target[1] += (pl.y - cam.target[1]) * followRate;
-      cam.target[2] += (gz + 0.8 - cam.target[2]) * followRate;
+      cam.target[2] += (gz + (pl.z || 0) + 0.8 - cam.target[2]) * followRate;
     }
   }
 

@@ -5,6 +5,7 @@
 //! 支援 `VACUUM INTO` 原子匯出與嚴格結構校驗匯入。
 
 pub mod models;
+pub mod office_day;
 pub mod presets;
 
 use crate::voxel::{bake_from_strip_bytes, blueprint::bake_blueprint_json, BakedStack};
@@ -14,10 +15,13 @@ use models::*;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
+use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
+use zip::write::SimpleFileOptions;
+use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 pub const SCHEMA_VERSION: &str = "1";
 pub const WORLD_EXT: &str = ".stackworld.db";
@@ -2044,4 +2048,344 @@ pub fn delete_world_asset(conn: &Connection, asset_id: &str) -> Result<Vec<Strin
     }
     touch_world_updated(conn);
     Ok(entity_ids)
+}
+
+/// 關聯世界節點摘要（供門傳送掃描、多世界獨立 HTML 與 `.stackpack.zip` 打包）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LinkedWorldEntry {
+    pub world_id: String,
+    pub file_name: String,
+    pub name: String,
+    pub theme: String,
+    #[serde(skip)]
+    pub path: PathBuf,
+}
+
+/// 從指定入口世界出發進行 BFS 圖形掃描（含循環防呆），找出所有透過「門 (`portal`)」連結的關聯世界
+pub fn collect_linked_worlds(
+    data_dir: &Path,
+    entry_file: &str,
+) -> Result<Vec<LinkedWorldEntry>, String> {
+    let entry_path = world_path(data_dir, entry_file)?;
+    if !entry_path.exists() {
+        return Err("找不到指定的入口世界檔案。".to_string());
+    }
+    let entry_safe = entry_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(entry_file)
+        .to_string();
+
+    let all_summaries = list_worlds(data_dir)?;
+    let mut by_id: HashMap<String, LinkedWorldEntry> = HashMap::new();
+    let mut by_file: HashMap<String, LinkedWorldEntry> = HashMap::new();
+
+    for sum in all_summaries {
+        let p = data_dir.join(&sum.file_name);
+        let item = LinkedWorldEntry {
+            world_id: sum.world_id.clone(),
+            file_name: sum.file_name.clone(),
+            name: sum.name,
+            theme: sum.theme,
+            path: p,
+        };
+        by_id.insert(sum.world_id, item.clone());
+        by_file.insert(sum.file_name, item);
+    }
+
+    let entry_item = by_file.get(&entry_safe).cloned().ok_or_else(|| {
+        "無法讀取入口世界的中繼資料。".to_string()
+    })?;
+
+    let mut visited_ids: HashSet<String> = HashSet::new();
+    let mut queue: VecDeque<LinkedWorldEntry> = VecDeque::new();
+    let mut result: Vec<LinkedWorldEntry> = Vec::new();
+
+    visited_ids.insert(entry_item.world_id.clone());
+    queue.push_back(entry_item);
+
+    while let Some(cur) = queue.pop_front() {
+        if let Ok(conn) = open_world_conn(&cur.path) {
+            if let Ok(mut st) = conn.prepare("SELECT meta_json FROM world_entities") {
+                if let Ok(rows) = st.query_map([], |r| r.get::<_, String>(0)) {
+                    for raw_meta in rows.flatten() {
+                        let Ok(v) = serde_json::from_str::<Value>(&raw_meta) else {
+                            continue;
+                        };
+                        let Some(portal) = v.get("portal") else {
+                            continue;
+                        };
+                        if portal.get("enabled").and_then(|b| b.as_bool()) != Some(true) {
+                            continue;
+                        }
+                        let next_item = portal
+                            .get("target_world_id")
+                            .and_then(|s| s.as_str())
+                            .filter(|s| !s.is_empty())
+                            .and_then(|wid| by_id.get(wid))
+                            .or_else(|| {
+                                portal
+                                    .get("target_world_file")
+                                    .and_then(|s| s.as_str())
+                                    .filter(|s| !s.is_empty())
+                                    .and_then(|fname| by_file.get(fname))
+                            });
+                        if let Some(nxt) = next_item {
+                            if !visited_ids.contains(&nxt.world_id) {
+                                visited_ids.insert(nxt.world_id.clone());
+                                queue.push_back(nxt.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        result.push(cur);
+    }
+
+    Ok(result)
+}
+
+/// 依資產 `sha256` 將貼圖 Data URL 去重寫入共用貼圖池（供多世界獨立 `.html` 縮減體積）
+pub fn load_asset_textures_by_sha256(
+    path: &Path,
+    pool: &mut HashMap<String, serde_json::Value>,
+) -> Result<(), String> {
+    let conn = open_world_conn(path)?;
+    let mut stmt = conn
+        .prepare("SELECT sha256, slices_png, normals_png, emissive_png FROM asset_catalog")
+        .map_err(|e| format!("查詢資產貼圖失敗：{e}"))?;
+    let rows = stmt
+        .query_map([], |r| {
+            let sha: String = r.get(0)?;
+            let slices: Vec<u8> = r.get(1)?;
+            let normals: Vec<u8> = r.get(2)?;
+            let emissive: Vec<u8> = r.get(3)?;
+            Ok((sha, slices, normals, emissive))
+        })
+        .map_err(|e| format!("讀取資產貼圖列失敗：{e}"))?;
+
+    for row in rows {
+        let (sha, slices, normals, emissive) =
+            row.map_err(|e| format!("解析資產貼圖失敗：{e}"))?;
+        if pool.contains_key(&sha) {
+            continue;
+        }
+        pool.insert(
+            sha,
+            serde_json::json!({
+                "slices": format!("data:image/png;base64,{}", STANDARD.encode(slices)),
+                "normals": format!("data:image/png;base64,{}", STANDARD.encode(normals)),
+                "emissive": format!("data:image/png;base64,{}", STANDARD.encode(emissive)),
+            }),
+        );
+    }
+    Ok(())
+}
+
+/// 將入口世界及其所有透過「門」相連的關聯世界打包為單一 `.stackpack.zip` 多世界編輯包
+pub fn export_world_pack_zip_bytes(
+    data_dir: &Path,
+    entry_file: &str,
+) -> Result<(Vec<u8>, String, usize), String> {
+    let linked = collect_linked_worlds(data_dir, entry_file)?;
+    if linked.is_empty() {
+        return Err("沒有可匯出的世界資料。".to_string());
+    }
+    let entry_name = linked[0].name.clone();
+    let entry_world_id = linked[0].world_id.clone();
+    let entry_file_name = linked[0].file_name.clone();
+    let count = linked.len();
+
+    let manifest = serde_json::json!({
+        "format": "stackcity-world-pack",
+        "version": 1,
+        "entry_world_id": entry_world_id,
+        "entry_file": entry_file_name,
+        "exported_at": now_iso(),
+        "worlds": linked.iter().map(|w| serde_json::json!({
+            "world_id": w.world_id,
+            "file_name": w.file_name,
+            "name": w.name,
+            "theme": w.theme,
+        })).collect::<Vec<_>>(),
+    });
+
+    let buf = Cursor::new(Vec::new());
+    let mut zip = ZipWriter::new(buf);
+    let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+
+    zip.start_file("manifest.json", opts)
+        .map_err(|e| format!("建立多世界清單失敗：{e}"))?;
+    let manifest_bytes =
+        serde_json::to_vec_pretty(&manifest).map_err(|e| format!("序列化多世界清單失敗：{e}"))?;
+    zip.write_all(&manifest_bytes)
+        .map_err(|e| format!("寫入多世界清單失敗：{e}"))?;
+
+    for item in &linked {
+        let db_bytes = export_world_db_bytes(&item.path)?;
+        let entry_path_in_zip = format!("worlds/{}", item.file_name);
+        zip.start_file(&entry_path_in_zip, opts)
+            .map_err(|e| format!("建立多世界壓縮項目失敗 ({})：{e}", item.file_name))?;
+        zip.write_all(&db_bytes)
+            .map_err(|e| format!("寫入多世界壓縮資料失敗 ({})：{e}", item.file_name))?;
+    }
+
+    let cursor = zip
+        .finish()
+        .map_err(|e| format!("完成多世界編輯包壓縮失敗：{e}"))?;
+    Ok((cursor.into_inner(), entry_name, count))
+}
+
+/// 驗證並匯入 `.stackpack.zip` 多世界編輯包，自動重新指派全新 World UUID 並重寫所有門 (`portal`) 的雙向連結
+pub fn import_world_pack_zip_bytes(
+    bytes: &[u8],
+    data_dir: &Path,
+) -> Result<(WorldSummary, Vec<WorldSummary>), String> {
+    let reader = Cursor::new(bytes);
+    let mut archive = ZipArchive::new(reader).map_err(|e| format!("無法解析多世界編輯包（ZIP 損毀或格式錯誤）：{e}"))?;
+
+    let mut manifest_opt: Option<Value> = None;
+    let mut db_entries: Vec<(String, Vec<u8>)> = Vec::new();
+
+    for i in 0..archive.len() {
+        let mut f = archive
+            .by_index(i)
+            .map_err(|e| format!("讀取壓縮項目失敗：{e}"))?;
+        if f.is_dir() {
+            continue;
+        }
+        let raw_name = f.name().replace('\\', "/");
+        if raw_name == "manifest.json" {
+            let mut text = String::new();
+            if f.read_to_string(&mut text).is_ok() {
+                manifest_opt = serde_json::from_str(&text).ok();
+            }
+            continue;
+        }
+        if raw_name.ends_with(WORLD_EXT) {
+            let mut buf = Vec::new();
+            f.read_to_end(&mut buf)
+                .map_err(|e| format!("解壓世界檔失敗 ({raw_name})：{e}"))?;
+            let short_file = Path::new(&raw_name)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or(&raw_name)
+                .to_string();
+            db_entries.push((short_file, buf));
+        }
+    }
+
+    if db_entries.is_empty() {
+        return Err("多世界編輯包內找不到任何 `.stackworld.db` 世界檔。".to_string());
+    }
+
+    let mut id_map: HashMap<String, String> = HashMap::new();
+    let mut file_map: HashMap<String, String> = HashMap::new();
+    let mut imported: Vec<(String, WorldSummary)> = Vec::new(); // (old_world_id, summary)
+
+    for (orig_file, db_bytes) in db_entries {
+        // 先讀取原檔內的 old_world_id 以便重寫所有 portal 引用
+        let tmp_dir = tempfile::tempdir().map_err(|e| format!("建立暫存目錄失敗：{e}"))?;
+        let tmp_p = tmp_dir.path().join("peek.stackworld.db");
+        fs::write(&tmp_p, &db_bytes).map_err(|e| format!("寫入暫存世界失敗：{e}"))?;
+        let old_conn = open_world_conn(&tmp_p)?;
+        let old_meta = read_world_meta(&old_conn)?;
+        drop(old_conn);
+
+        let mut summary = import_world_db_bytes(&db_bytes, data_dir, Some(&old_meta.name))?;
+        let new_world_id = Uuid::new_v4().to_string();
+        let dest_path = data_dir.join(&summary.file_name);
+        {
+            let conn = open_world_conn(&dest_path)?;
+            set_meta_kv(&conn, "world_id", &new_world_id)?;
+            touch_world_updated(&conn);
+        }
+        summary.world_id = new_world_id.clone();
+
+        id_map.insert(old_meta.world_id.clone(), new_world_id);
+        file_map.insert(orig_file, summary.file_name.clone());
+        imported.push((old_meta.world_id, summary));
+    }
+
+    // 全部世界落地並取得新 UUID 後，遍歷重寫所有門的目標 ID 與目標檔名，並刷新 __initial__ 快照
+    for (_, sum) in &imported {
+        let dest_path = data_dir.join(&sum.file_name);
+        let mut conn = open_world_conn(&dest_path)?;
+        let updates: Vec<(String, String)> = {
+            let mut st = conn
+                .prepare("SELECT id, meta_json FROM world_entities")
+                .map_err(|e| format!("讀取匯入世界實體失敗：{e}"))?;
+            let rows = st
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+                .map_err(|e| format!("列舉匯入世界實體失敗：{e}"))?;
+            let mut list = Vec::new();
+            for row in rows.flatten() {
+                let (eid, raw_meta) = row;
+                let Ok(mut root) = serde_json::from_str::<Value>(&raw_meta) else {
+                    continue;
+                };
+                let Some(portal) = root.get_mut("portal").and_then(|p| p.as_object_mut()) else {
+                    continue;
+                };
+                let mut changed = false;
+                if let Some(old_tid) = portal
+                    .get("target_world_id")
+                    .and_then(|v| v.as_str())
+                    .map(ToString::to_string)
+                {
+                    if let Some(new_tid) = id_map.get(&old_tid) {
+                        portal.insert("target_world_id".to_string(), Value::String(new_tid.clone()));
+                        changed = true;
+                    }
+                }
+                if let Some(old_tfile) = portal
+                    .get("target_world_file")
+                    .and_then(|v| v.as_str())
+                    .map(ToString::to_string)
+                {
+                    if let Some(new_tfile) = file_map.get(&old_tfile) {
+                        portal.insert(
+                            "target_world_file".to_string(),
+                            Value::String(new_tfile.clone()),
+                        );
+                        changed = true;
+                    }
+                }
+                if changed {
+                    if let Ok(next_str) = serde_json::to_string(&root) {
+                        list.push((eid, next_str));
+                    }
+                }
+            }
+            list
+        };
+
+        if !updates.is_empty() {
+            let tx = conn.transaction().map_err(|e| format!("開啟更新門連結交易失敗：{e}"))?;
+            for (eid, meta_str) in updates {
+                tx.execute(
+                    "UPDATE world_entities SET meta_json = ?2 WHERE id = ?1",
+                    params![eid, meta_str],
+                )
+                .map_err(|e| format!("更新匯入門連結失敗：{e}"))?;
+            }
+            tx.commit().map_err(|e| format!("提交門連結更新失敗：{e}"))?;
+        }
+        let _ = conn.execute("DELETE FROM world_snapshots WHERE label = '__initial__'", []);
+        drop(conn);
+        let _ = create_snapshot(&dest_path, &sum.file_name, "__initial__");
+    }
+
+    let entry_old_id = manifest_opt
+        .as_ref()
+        .and_then(|m| m.get("entry_world_id"))
+        .and_then(|v| v.as_str());
+
+    let entry_summary = entry_old_id
+        .and_then(|eid| imported.iter().find(|(old_id, _)| old_id == eid).map(|(_, s)| s.clone()))
+        .unwrap_or_else(|| imported[0].1.clone());
+
+    let all_summaries = imported.into_iter().map(|(_, s)| s).collect();
+    Ok((entry_summary, all_summaries))
 }

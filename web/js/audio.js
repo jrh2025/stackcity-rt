@@ -739,6 +739,27 @@ class SoundEngine {
         this._tone(ctx, 290, now, 0.07, "square", 0.06, 440);
         break;
       }
+      case "mount": {
+        this._tone(ctx, 392.0, now, 0.1, "triangle", 0.1, 523.25);
+        this._tone(ctx, 587.33, now + 0.07, 0.14, "sine", 0.11);
+        break;
+      }
+      case "dismount": {
+        this._tone(ctx, 523.25, now, 0.09, "triangle", 0.09, 392.0);
+        this._tone(ctx, 349.23, now + 0.07, 0.14, "sine", 0.09);
+        break;
+      }
+      case "door": {
+        this._tone(ctx, 220.0, now, 0.11, "triangle", 0.1, 185.0);
+        this._tone(ctx, 523.25, now + 0.08, 0.18, "sine", 0.1, 783.99);
+        this._tone(ctx, 659.25, now + 0.15, 0.22, "sine", 0.09, 1046.5);
+        break;
+      }
+      case "locked": {
+        this._tone(ctx, 196.0, now, 0.09, "square", 0.07, 155.0);
+        this._tone(ctx, 164.81, now + 0.11, 0.12, "square", 0.07, 130.0);
+        break;
+      }
       case "delete": {
         this._tone(ctx, 260, now, 0.09, "triangle", 0.07, 130);
         break;

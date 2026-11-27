@@ -134,18 +134,31 @@
 
         <!-- 街道漫步模式專屬操作提示 -->
         <div id="cityWalkBanner" class="citywalk-banner hidden">
-          <span>🚶 <strong>CityRT 街道漫步</strong>｜WASD 移動（A左/D右）、按住拖曳轉向、點擊或按 F 與身旁物件互動、空白鍵跳躍</span>
+          <span>🚶 <strong>CityRT 街道漫步</strong>｜WASD 移動（A左/D右）、按住拖曳轉向、點擊或按 F 與身旁物件互動、按 G 搭乘交通工具、空白鍵跳躍</span>
           <button id="btnWalkChangeAvatar" class="btn btn-gold" style="padding:3px 9px;">🧑 換造型</button>
           <button id="btnExitWalk" class="btn btn-sub">返回上帝視角</button>
         </div>
 
+        <!-- 交通工具搭乘狀態與切換橫幅 -->
+        <div id="mountBanner" class="mount-banner hidden">
+          <span id="mountBannerText">🚗 正在駕駛載具</span>
+          <button id="btnMountSwitchMode" class="btn btn-sub hidden" style="padding:3px 9px;">🔄 切換駕駛／巡航 (Tab)</button>
+          <button id="btnMountDismount" class="btn btn-gold" style="padding:3px 9px;">🚪 下車 (G)</button>
+        </div>
+
         <!-- 畫布底部快捷操作提示 -->
         <div id="hudHint" class="hud-bottom-hint">
-          WASD／方向鍵：操控玩家移動・空白鍵：跳躍・F 或雙擊物件：任務互動・右鍵旋轉・中鍵／✋拖曳：移動畫面
+          WASD／方向鍵：移動・G：上下車／船／馬・空白鍵：跳躍／鳴笛・F 或雙擊物件：任務互動・右鍵旋轉・中鍵／✋拖曳：移動畫面
         </div>
 
         <!-- 任務目標進度追蹤浮動 HUD -->
         <div id="questHud" class="quest-hud hidden"></div>
+
+        <!-- 跨世界門傳送淡入淡出轉場遮罩 -->
+        <div id="portalTransition" class="portal-transition">
+          <div class="portal-transition-icon">🚪</div>
+          <div id="portalTransitionText">正在穿越門扉前往新世界...</div>
+        </div>
 
         <!-- 提示訊息 Toast -->
         <div id="toastStack" class="toast-stack"></div>
@@ -170,7 +183,7 @@
       <div class="modal-header">
         <div>
           <h2>✨ Sprite-Stacking 造物工坊</h2>
-          <p>純 Rust 即時體素烘焙：支援 68 種建築/角色/家具/機械原型、3D 積木藍圖、四視圖雕刻與套件匯入</p>
+          <p>純 Rust 即時體素烘焙：支援 71 種建築/角色/家具/機械原型、3D 積木藍圖、四視圖雕刻與套件匯入</p>
         </div>
         <button class="modal-close" data-close-modal="studioModal">✕</button>
       </div>
@@ -195,7 +208,7 @@
                 <span id="stSliceVal" class="mono-badge">44</span>
               </label>
             </div>
-            <div class="sec-title" style="margin-top:8px;">6 大類 68 種內建精選原型（點擊立即生成）</div>
+            <div class="sec-title" style="margin-top:8px;">6 大類 71 種內建精選原型（點擊立即生成）</div>
             <div id="stPresetCatalog" class="preset-chips"></div>
           </div>
 
@@ -407,6 +420,11 @@
           </label>
         </div>
 
+        <div class="sec-title">🌟 多世界完整企劃劇本（門 ＋ 交通工具跨世界聯動）</div>
+        <div class="theme-grid">
+          <button class="theme-card theme-card-featured" data-theme="office_worker_day">💼 社畜的一天（5 世界聯動完整企劃）<small>女上班族主角・溫馨住家 ↔ 208 號固定路線公車都市 ↔ 公司辦公室 ↔ 生活大賣場 ↔ 療癒餐廳</small></button>
+        </div>
+
         <div class="sec-title">🌍 戶外宏觀探索場景（40×40）</div>
         <div id="nwThemeCards" class="theme-grid">
           <button class="theme-card active" data-theme="kingdom">🏰 奇幻星光王國<small>石崖城堡、護城河、騎士巡邏與煙火</small></button>
@@ -578,15 +596,25 @@
         <button class="modal-close" data-close-modal="shareModal">✕</button>
       </div>
       <div class="modal-content">
+        <div id="shareLinkedInfo" class="hint-text" style="padding:6px 9px;background:rgba(56,189,248,0.1);border:1px solid rgba(56,189,248,0.35);border-radius:7px;color:#bae6fd;">
+          🔍 正在檢查門連結的關聯世界...
+        </div>
+
         <div class="import-box share-mode-card">
-          <h4>📤 方式一：完整分享（<code>.stackworld.db</code>・好友可參觀亦可編輯擴建）</h4>
-          <p class="hint-text">將所有 Sprite-Stack 貼圖、藍圖、地形、路徑、事件與自訂音樂封裝在單一 SQLite 檔案內。適合與創作夥伴共享，對方匯入後可自由改圖、加物件與繼續擴建。</p>
-          <button id="btnExportWorldDb" class="btn btn-primary" style="width:100%;">⬇️ 下載完整分享檔（.stackworld.db）</button>
+          <h4>📤 方式一：單一世界完整分享（<code>.stackworld.db</code>・好友可參觀亦可編輯）</h4>
+          <p class="hint-text">將目前單一世界的所有 Sprite-Stack 貼圖、藍圖、地形、路徑、事件與自訂音樂封裝在單一 SQLite 檔案內。</p>
+          <button id="btnExportWorldDb" class="btn btn-primary" style="width:100%;">⬇️ 下載單一世界檔（.stackworld.db）</button>
+        </div>
+
+        <div class="import-box share-mode-card">
+          <h4>📦 方式二：多世界聯動編輯包（<code>.stackpack.zip</code>・含所有門連結之室內外世界）</h4>
+          <p class="hint-text">自動沿「門」掃描並打包本世界與所有相連室內世界，好友匯入後雙向門連結與所有藍圖貼圖 100% 完整保留，可繼續共同編輯擴建。</p>
+          <button id="btnExportWorldPack" class="btn btn-accent-soft" style="width:100%;">📦 下載多世界編輯包（.stackpack.zip）</button>
         </div>
 
         <div class="import-box share-mode-card playonly-card">
-          <h4>🎮 方式二：單純遊戲分享（獨立 <code>.html</code> 網頁檔・純玩家闖關不可修改）</h4>
-          <p class="hint-text">匯出單一自包含網頁檔，好友<strong>免裝程式、雙擊即可直接在瀏覽器以玩家身分遊玩</strong>您規劃好的關卡、音樂、互動與 NPC，且完全鎖定無法進入編輯模式或改動任何內容。</p>
+          <h4>🎮 方式三：單純遊戲分享（獨立 <code>.html</code> 網頁檔・純玩家多世界闖關）</h4>
+          <p class="hint-text">自動打包本世界與所有透過「門」連結的室內世界並去重貼圖。好友<strong>免裝程式、雙擊即可直接在瀏覽器暢玩</strong>所有關卡與過門探索，完全鎖定編輯。</p>
           <div class="row-gap">
             <button id="btnExportPlayHtml" class="btn btn-gold" style="flex:1.4;">🎮 下載單純遊戲網頁檔（.html）</button>
             <a id="btnPreviewPlayHtml" class="btn btn-sub" target="_blank" rel="noopener" href="#">👁️ 新分頁試玩</a>
@@ -594,11 +622,11 @@
         </div>
 
         <div class="import-box">
-          <h4>📥 載入好友完整分享的世界（<code>.stackworld.db</code>）</h4>
-          <p class="hint-text">匯入後可直接選擇以「好友參觀模式」闖關，或開啟「編輯模式」一起擴建！</p>
+          <h4>📥 匯入好友分享的世界（支援 <code>.stackworld.db</code> 與多世界 <code>.zip</code>）</h4>
+          <p class="hint-text">支援單一世界檔或 <code>.stackpack.zip</code> 多世界編輯包！匯入多世界包時將自動重新建立安全世界連結。</p>
           <div class="row-gap">
-            <input id="importWorldFile" type="file" accept=".db,.stackworld.db" />
-            <button id="btnImportWorldDb" class="btn btn-accent-soft">🌍 匯入世界</button>
+            <input id="importWorldFile" type="file" accept=".db,.stackworld.db,.zip,.stackpack.zip" />
+            <button id="btnImportWorldDb" class="btn btn-accent-soft">🌍 匯入世界／專案</button>
           </div>
         </div>
       </div>

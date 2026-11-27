@@ -56,6 +56,21 @@ pub async fn create_world(
     if name.is_empty() {
         return Err(ApiError::bad_req("請輸入世界名稱。"));
     }
+    if req.theme.trim() == "office_worker_day" {
+        let worlds =
+            db::office_day::create_office_worker_day_campaign(&st.data_dir, name, &req.author)
+                .map_err(ApiError::bad_req)?;
+        let entry = worlds
+            .first()
+            .cloned()
+            .ok_or_else(|| ApiError::internal("建置《社畜的一天》多世界企劃後找不到入口世界。"))?;
+        return Ok(Json(json!({
+            "world": entry,
+            "worlds": worlds,
+            "count": worlds.len(),
+            "is_campaign": true
+        })));
+    }
     let summary = create_world_from_preset(&st.data_dir, &req.theme, name, &req.author, None)
         .map_err(ApiError::bad_req)?;
     Ok(Json(json!({ "world": summary })))
@@ -1087,4 +1102,199 @@ pub async fn reset_world_handler(
     let full = db::reset_world_state(&st.data_dir, &path, req.mode.trim(), &safe_name)
         .map_err(ApiError::bad_req)?;
     Ok(Json(serde_json::to_value(full).map_err(|e| ApiError::internal(e.to_string()))?))
+}
+
+#[derive(Deserialize)]
+pub struct LinkInteriorReq {
+    #[serde(default = "default_interior_theme")]
+    pub theme: String,
+    pub name: Option<String>,
+    pub door_offset_fwd: Option<f64>,
+}
+fn default_interior_theme() -> String {
+    "shop_interior".to_string()
+}
+
+/// 一鍵為建築物或門建立對應室內世界並完成雙向門連結
+pub async fn link_interior_portal(
+    State(st): State<AppState>,
+    Path((file, id)): Path<(String, String)>,
+    Json(req): Json<LinkInteriorReq>,
+) -> Result<Json<Value>, ApiError> {
+    let src_path = db::world_path(&st.data_dir, &file).map_err(ApiError::bad_req)?;
+    if !src_path.exists() {
+        return Err(ApiError::not_found("找不到來源世界檔案。"));
+    }
+    let src_safe_name = src_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(&file)
+        .to_string();
+
+    let src_conn = db::open_world_conn(&src_path).map_err(ApiError::bad_req)?;
+    let src_meta = db::read_world_meta(&src_conn).map_err(ApiError::internal)?;
+    let mut src_ent: WorldEntity = src_conn
+        .query_row(
+            "SELECT id, asset_id, name, x, y, z, yaw, scale,
+                    COALESCE(scale_x, scale), COALESCE(scale_y, scale), COALESCE(scale_z, scale),
+                    parent_id, tint_hex, emissive_on, visible, anim_mode, tag, meta_json
+             FROM world_entities WHERE id = ?1",
+            params![id],
+            |r| {
+                Ok(WorldEntity {
+                    id: r.get(0)?,
+                    asset_id: r.get(1)?,
+                    name: r.get(2)?,
+                    x: r.get(3)?,
+                    y: r.get(4)?,
+                    z: r.get(5)?,
+                    yaw: r.get(6)?,
+                    scale: r.get(7)?,
+                    scale_x: r.get(8)?,
+                    scale_y: r.get(9)?,
+                    scale_z: r.get(10)?,
+                    parent_id: r.get(11)?,
+                    tint_hex: r.get(12)?,
+                    emissive_on: r.get::<_, i64>(13)? != 0,
+                    visible: r.get::<_, i64>(14)? != 0,
+                    anim_mode: r.get(15)?,
+                    tag: r.get(16)?,
+                    meta_json: r.get(17)?,
+                })
+            },
+        )
+        .map_err(|_| ApiError::not_found("找不到指定的建築物或門物件。"))?;
+
+    let interior_name = req
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| format!("{} 內部", src_ent.name));
+
+    let theme = if req.theme.trim().is_empty() {
+        "shop_interior".to_string()
+    } else {
+        req.theme.trim().to_string()
+    };
+
+    let interior_sum =
+        create_world_from_preset(&st.data_dir, &theme, &interior_name, &src_meta.author, None)
+            .map_err(ApiError::bad_req)?;
+
+    // 計算來源建築門口正前方安全返回座標
+    let ret_fwd = req.door_offset_fwd.unwrap_or(1.85);
+    let yaw_rad = src_ent.yaw.to_radians();
+    let ret_x = (src_ent.x + (-yaw_rad.sin()) * ret_fwd).clamp(1.5, (src_meta.width as f64) - 1.5);
+    let ret_y = (src_ent.y + yaw_rad.cos() * ret_fwd).clamp(1.5, (src_meta.height as f64) - 1.5);
+
+    let exit_x = (interior_sum.width as f64) * 0.5;
+    let exit_y = (interior_sum.height as f64) - 2.1;
+    let enter_spawn_y = (exit_y - 1.6).max(2.0);
+    let exit_door_id = Uuid::new_v4().to_string();
+
+    // 在新建室內世界南側牆邊自動放置「古典木門」回程出口
+    let interior_path = st.data_dir.join(&interior_sum.file_name);
+    {
+        let int_conn = db::open_world_conn(&interior_path).map_err(ApiError::internal)?;
+        let door_baked = crate::voxel::generators::generate_from_prompt("wooden_door", 36, 42)
+            .map_err(ApiError::internal)?;
+        let door_asset =
+            db::insert_asset_into_world(&int_conn, &st.data_dir, &door_baked, "preset", None)
+                .map_err(ApiError::internal)?;
+
+        let exit_meta = json!({
+            "portal": {
+                "enabled": true,
+                "kind": "exit",
+                "label": format!("離開返回「{}」", src_meta.name),
+                "target_world_id": src_meta.world_id,
+                "target_world_file": src_safe_name,
+                "target_x": ret_x,
+                "target_y": ret_y,
+                "target_yaw": (src_ent.yaw + 180.0) % 360.0,
+                "target_portal_id": src_ent.id,
+                "door_offset_fwd": 0.55,
+                "required_item": "",
+                "required_flag": "",
+                "locked_text": ""
+            }
+        })
+        .to_string();
+
+        let s = door_asset.default_scale as f64;
+        int_conn
+            .execute(
+                "INSERT INTO world_entities
+                 (id, asset_id, name, x, y, z, yaw, scale, scale_x, scale_y, scale_z, parent_id, tint_hex, emissive_on, visible, anim_mode, tag, meta_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 0.0, 180.0, ?6, ?6, ?6, ?6, NULL, '#ffffff', 1, 1, 'static', 'portal_exit', ?7)",
+                params![
+                    exit_door_id,
+                    door_asset.id,
+                    format!("出口大門（回{}）", src_meta.name),
+                    exit_x,
+                    exit_y,
+                    s,
+                    exit_meta
+                ],
+            )
+            .map_err(|e| ApiError::internal(format!("建立室內出口門失敗：{e}")))?;
+
+        db::set_meta_kv(&int_conn, "player_x", &exit_x.to_string()).map_err(ApiError::internal)?;
+        db::set_meta_kv(&int_conn, "player_y", &enter_spawn_y.to_string())
+            .map_err(ApiError::internal)?;
+        db::touch_world_updated(&int_conn);
+    }
+
+    // 更新來源世界建築物的門設定（完整保留原有 interaction 與 vehicle 欄位）
+    let mut root = serde_json::from_str::<Value>(&src_ent.meta_json)
+        .ok()
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    root.insert(
+        "portal".to_string(),
+        json!({
+            "enabled": true,
+            "kind": "enter",
+            "label": format!("進入「{}」", interior_sum.name),
+            "target_world_id": interior_sum.world_id,
+            "target_world_file": interior_sum.file_name,
+            "target_x": exit_x,
+            "target_y": enter_spawn_y,
+            "target_yaw": 180.0,
+            "target_portal_id": exit_door_id,
+            "door_offset_fwd": req.door_offset_fwd.unwrap_or(1.15),
+            "required_item": "",
+            "required_flag": "",
+            "locked_text": ""
+        }),
+    );
+    src_ent.meta_json = Value::Object(root).to_string();
+
+    src_conn
+        .execute(
+            "UPDATE world_entities SET meta_json = ?2 WHERE id = ?1",
+            params![src_ent.id, src_ent.meta_json],
+        )
+        .map_err(|e| ApiError::internal(format!("更新來源建築門連結失敗：{e}")))?;
+    db::touch_world_updated(&src_conn);
+
+    Ok(Json(json!({
+        "source_entity": src_ent,
+        "interior_world": interior_sum,
+        "exit_door_id": exit_door_id
+    })))
+}
+
+/// 查詢指定世界透過「門」連結的所有關聯世界清單
+pub async fn list_linked_worlds(
+    State(st): State<AppState>,
+    Path(file): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let linked = db::collect_linked_worlds(&st.data_dir, &file).map_err(ApiError::bad_req)?;
+    Ok(Json(json!({
+        "count": linked.len(),
+        "worlds": linked
+    })))
 }

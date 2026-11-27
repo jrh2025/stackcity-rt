@@ -1148,3 +1148,428 @@ async fn test_rename_world_and_list_reflects_new_name() {
         .unwrap();
     assert_eq!(found["name"], "星光夢想新城市");
 }
+
+#[tokio::test]
+async fn test_stage1_carriage_and_vehicle_mount_metadata_roundtrip() {
+    // 1. 驗證「皇家馬車」原型與關鍵字最長優先匹配不會誤判成一般馬匹
+    for prompt in ["皇家馬車", "雙馬車", "carriage"] {
+        let baked = generate_from_prompt(prompt, 36, 42)
+            .unwrap_or_else(|e| panic!("生成馬車 {prompt} 失敗：{e}"));
+        assert_eq!(baked.category, "vehicle", "{prompt} 必須歸類為 vehicle");
+        assert!(baked.diagnostics.voxels > 300, "{prompt} 體素數量過少");
+        assert!(baked.diagnostics.blink_free, "{prompt} 應通過防閃爍檢查");
+    }
+
+    // 2. 驗證載具設定與任務互動可共存於 entity.meta_json，且純遊戲 HTML 完整內嵌搭乘系統
+    let (_tmp, base) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    let worlds: Value = client
+        .get(format!("{base}/api/worlds"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let file_name = worlds["worlds"][0]["file_name"].as_str().unwrap().to_string();
+
+    let gen_resp: Value = client
+        .post(format!("{base}/api/worlds/{file_name}/assets/generate"))
+        .json(&json!({ "prompt": "皇家馬車", "slices": 36 }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let asset_id = gen_resp["asset"]["id"].as_str().unwrap().to_string();
+
+    let spawn_resp: Value = client
+        .post(format!("{base}/api/worlds/{file_name}/entities"))
+        .json(&json!({ "asset_id": asset_id, "x": 18.0, "y": 18.0, "z": 0.0, "yaw": 90.0 }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let ent_id = spawn_resp["entities"][0]["id"].as_str().unwrap().to_string();
+
+    let combined_meta = json!({
+        "interaction": { "kind": "clue", "title": "馬車夫", "dialogue": "歡迎搭乘皇家馬車！" },
+        "vehicle": {
+            "rideable": true,
+            "mode": "both",
+            "seat_style": "ride_on",
+            "speed_mul": 1.65,
+            "seat_z": 0.58,
+            "seat_forward": 0.18
+        }
+    })
+    .to_string();
+
+    let patch_resp: Value = client
+        .patch(format!("{base}/api/worlds/{file_name}/entities/{ent_id}"))
+        .json(&json!({ "meta_json": combined_meta }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let saved_meta_str = patch_resp["entity"]["meta_json"].as_str().unwrap();
+    let saved_meta: Value = serde_json::from_str(saved_meta_str).unwrap();
+    assert_eq!(saved_meta["interaction"]["kind"], "clue");
+    assert_eq!(saved_meta["vehicle"]["mode"], "both");
+    assert_eq!(saved_meta["vehicle"]["seat_style"], "ride_on");
+
+    let html_text = client
+        .get(format!("{base}/api/worlds/{file_name}/export-html"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(html_text.contains("mountBanner"));
+    assert!(html_text.contains("toggleMountNearest"));
+    assert!(html_text.contains("parseEntityVehicle"));
+}
+
+#[tokio::test]
+async fn test_stage2_building_doors_multilevel_pack_and_html_export() {
+    // 1. 驗證兩種門原型可生成且不影響既有 gate（平交道柵欄）
+    for (prompt, expected_title) in [
+        ("古典木門", "古典木門"),
+        ("星光傳送門", "星光傳送門"),
+        ("平交道柵欄", "平交道柵欄"),
+    ] {
+        let baked = generate_from_prompt(prompt, 36, 42)
+            .unwrap_or_else(|e| panic!("生成 {prompt} 失敗：{e}"));
+        assert_eq!(baked.category, "prop");
+        assert!(baked.diagnostics.voxels > 200, "{prompt} 體素數量過少");
+        assert!(baked.diagnostics.blink_free, "{prompt} 應通過防閃爍檢查");
+        assert_eq!(baked.title, expected_title);
+    }
+
+    // 2. 測試建築物一鍵建立室內世界＋雙向門連結＋循環防呆掃描
+    let (_tmp, base) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    let worlds: Value = client
+        .get(format!("{base}/api/worlds"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let main_file = worlds["worlds"][0]["file_name"].as_str().unwrap().to_string();
+
+    let main_state: Value = client
+        .get(format!("{base}/api/worlds/{main_file}/state"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let main_world_id = main_state["meta"]["world_id"].as_str().unwrap().to_string();
+
+    // 找一個建築物（若無則建一個）來綁定室內世界
+    let building_ent_id = main_state["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["tag"].as_str() == Some("landmark") || e["name"].as_str().unwrap_or("").contains("城堡"))
+        .map(|e| e["id"].as_str().unwrap().to_string())
+        .unwrap_or_else(|| main_state["entities"][0]["id"].as_str().unwrap().to_string());
+
+    let link_resp: Value = client
+        .post(format!("{base}/api/worlds/{main_file}/entities/{building_ent_id}/link-interior"))
+        .json(&json!({ "theme": "shop_interior", "name": "王國魔法商店內部" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let interior_file = link_resp["interior_world"]["file_name"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let interior_world_id = link_resp["interior_world"]["world_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let src_meta: Value = serde_json::from_str(
+        link_resp["source_entity"]["meta_json"].as_str().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(src_meta["portal"]["enabled"], json!(true));
+    assert_eq!(src_meta["portal"]["kind"], json!("enter"));
+    assert_eq!(src_meta["portal"]["target_world_id"], json!(interior_world_id));
+
+    // 驗證室內世界自動誕生連回主世界的 exit 門
+    let int_state: Value = client
+        .get(format!("{base}/api/worlds/{interior_file}/state"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let has_exit_door = int_state["entities"].as_array().unwrap().iter().any(|e| {
+        serde_json::from_str::<Value>(e["meta_json"].as_str().unwrap_or("{}"))
+            .ok()
+            .and_then(|v| {
+                let p = v.get("portal")?;
+                Some(
+                    p.get("enabled") == Some(&json!(true))
+                        && p.get("kind") == Some(&json!("exit"))
+                        && p.get("target_world_id") == Some(&json!(main_world_id)),
+                )
+            })
+            .unwrap_or(false)
+    });
+    assert!(has_exit_door, "新建室內世界必須自動含有一扇連回原世界的出口門");
+
+    // 3. 驗證 linked-worlds BFS（雙向門不陷入無窮迴圈，且準確回傳 2 座世界）
+    let linked: Value = client
+        .get(format!("{base}/api/worlds/{main_file}/linked-worlds"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(linked["count"], json!(2));
+
+    // 4. 驗證多世界純遊戲 .html 自動內嵌兩座世界與共用去重貼圖池
+    let html_text = client
+        .get(format!("{base}/api/worlds/{main_file}/export-html"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(html_text.contains("entryWorldId"));
+    assert!(html_text.contains("texturePool"));
+    assert!(html_text.contains(&interior_world_id));
+    assert!(html_text.contains("parseEntityPortal"));
+    assert!(html_text.contains("portalTransition"));
+
+    // 5. 驗證 .stackpack.zip 多世界編輯包匯出與匯入後 UUID 重寫無斷鏈
+    let pack_resp = client
+        .get(format!("{base}/api/worlds/{main_file}/export-pack"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(pack_resp.status(), 200);
+    let pack_bytes = pack_resp.bytes().await.unwrap().to_vec();
+    assert!(pack_bytes.starts_with(b"PK\x03\x04"));
+
+    let (_friend_tmp, friend_base) = spawn_test_server().await;
+    let boundary = "----StackCityPackBoundary7e29a";
+    let mut mp_body: Vec<u8> = Vec::new();
+    mp_body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"kingdom_pack.stackpack.zip\"\r\nContent-Type: application/zip\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    mp_body.extend_from_slice(&pack_bytes);
+    mp_body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+    let import_resp: Value = client
+        .post(format!("{friend_base}/api/worlds/import"))
+        .header(
+            reqwest::header::CONTENT_TYPE,
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(mp_body)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(import_resp["is_pack"], json!(true));
+    assert_eq!(import_resp["count"], json!(2));
+
+    let new_entry_file = import_resp["world"]["file_name"].as_str().unwrap().to_string();
+    let new_entry_id = import_resp["world"]["world_id"].as_str().unwrap().to_string();
+    assert_ne!(new_entry_id, main_world_id, "匯入多世界包必須配發全新不衝突的世界 UUID");
+
+    let new_linked: Value = client
+        .get(format!("{friend_base}/api/worlds/{new_entry_file}/linked-worlds"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        new_linked["count"],
+        json!(2),
+        "匯入後必須自動重寫門連結至新世界 UUID 與檔名，維持 2 座聯動世界完整暢通"
+    );
+}
+
+#[tokio::test]
+async fn test_office_worker_day_five_world_campaign_and_new_presets() {
+    // 1. 驗證 5 種《社畜的一天》專屬新預設皆可生成且防閃爍，並正確匹配關鍵字而不被既有預設搶佔
+    for (prompt, expected_cat) in [
+        ("粉領女上班族", "character"),
+        ("公車站牌候車亭", "prop"),
+        ("精品咖啡茶水吧", "prop"),
+        ("多功能事務印表機", "prop"),
+        ("浴室洗手台鏡櫃", "prop"),
+    ] {
+        let baked = generate_from_prompt(prompt, 36, 42)
+            .unwrap_or_else(|e| panic!("生成新預設 {prompt} 失敗：{e}"));
+        assert_eq!(baked.category, expected_cat, "{prompt} 分類不符");
+        assert!(baked.diagnostics.voxels > 150, "{prompt} 體素數量過少");
+        assert!(baked.diagnostics.blink_free, "{prompt} 應通過防閃爍檢查");
+    }
+
+    // 2. 透過 POST /api/worlds 建立完整 5 世界《社畜的一天》企劃
+    let (_tmp, base) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    let create_resp: Value = client
+        .post(format!("{base}/api/worlds"))
+        .json(&json!({
+            "name": "社畜的一天測試企劃",
+            "theme": "office_worker_day",
+            "author": "企劃測試員"
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    assert_eq!(create_resp["is_campaign"], json!(true));
+    assert_eq!(create_resp["count"], json!(5));
+    let worlds = create_resp["worlds"].as_array().unwrap();
+    assert_eq!(worlds.len(), 5);
+
+    let home_file = create_resp["world"]["file_name"].as_str().unwrap().to_string();
+    let city_file = worlds[1]["file_name"].as_str().unwrap().to_string();
+
+    // 3. 驗證 5 座世界皆透過門彼此連通且 BFS 回傳恰好 5 座
+    let linked: Value = client
+        .get(format!("{base}/api/worlds/{home_file}/linked-worlds"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(linked["count"], json!(5), "應透過雙向門完整串連住家・都市・辦公室・賣場・餐廳共 5 座世界");
+
+    // 4. 驗證每座世界的玩家主角皆為粉領女上班族，且公車與建築門皆齊全、無陸地實體落水
+    for w in worlds {
+        let fname = w["file_name"].as_str().unwrap();
+        let st: Value = client
+            .get(format!("{base}/api/worlds/{fname}/state"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+
+        let player_asset_id = st["meta"]["player_asset_id"].as_str().unwrap_or("");
+        let ol_asset = st["assets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["id"].as_str() == Some(player_asset_id))
+            .expect("每座世界必須設定玩家專屬女上班族資產");
+        assert_eq!(ol_asset["name"].as_str(), Some("粉領女上班族"));
+        assert_eq!(st["meta"]["player_name"].as_str(), Some("上班族小美"));
+    }
+
+    let city_state: Value = client
+        .get(format!("{base}/api/worlds/{city_file}/state"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    // 檢查都市世界固定路線公車（rideable=true, mode="both", 8 航點閉合環線）
+    let buses: Vec<&Value> = city_state["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["name"].as_str().unwrap_or("").contains("208 號通勤公車"))
+        .collect();
+    assert_eq!(buses.len(), 2, "都市大道應有 2 班 208 號固定路線公車");
+    for b in &buses {
+        let vmeta: Value = serde_json::from_str(b["meta_json"].as_str().unwrap_or("{}")).unwrap();
+        assert_eq!(vmeta["vehicle"]["rideable"], json!(true));
+        assert_eq!(vmeta["vehicle"]["mode"], json!("both"));
+        assert_eq!(vmeta["vehicle"]["seat_style"], json!("inside"));
+    }
+    let bus_paths: Vec<&Value> = city_state["paths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|p| p["name"].as_str().unwrap_or("").contains("208 號公車"))
+        .collect();
+    assert_eq!(bus_paths.len(), 2);
+    assert!(bus_paths[0]["waypoints"].as_array().unwrap().len() >= 4);
+
+    // 5. 驗證 .stackpack.zip 與純遊戲 .html 自動打包全部 5 座世界
+    let pack_bytes = client
+        .get(format!("{base}/api/worlds/{home_file}/export-pack"))
+        .send()
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    assert!(pack_bytes.starts_with(b"PK\x03\x04"));
+
+    let html_text = client
+        .get(format!("{base}/api/worlds/{home_file}/export-html"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(html_text.contains("社畜的一天測試企劃・公司辦公室"));
+    assert!(html_text.contains("社畜的一天測試企劃・生活大賣場"));
+    assert!(html_text.contains("社畜的一天測試企劃・療癒美食餐廳"));
+
+    // 6. 驗證執行 world_initial 重置後仍完整保留 5 世界門連結與住家客製劇本
+    let reset_resp = client
+        .post(format!("{base}/api/worlds/{home_file}/reset"))
+        .json(&json!({ "mode": "world_initial" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reset_resp.status(), 200);
+    let linked_after_reset: Value = client
+        .get(format!("{base}/api/worlds/{home_file}/linked-worlds"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        linked_after_reset["count"],
+        json!(5),
+        "《社畜的一天》回復初始狀態後應透過 __initial__ 快照還原並保留全部 5 座聯動世界"
+    );
+}

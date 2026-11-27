@@ -60,10 +60,12 @@ pub fn build_router(state: AppState) -> Router {
         // 世界管理與狀態 CRUD
         .route("/api/worlds", get(worlds::list_worlds).post(worlds::create_world))
         .route("/api/worlds/import", post(share::import_world))
+        .route("/api/worlds/import-pack", post(share::import_world_pack))
         .route("/api/worlds/:file", delete(worlds::delete_world))
         .route("/api/worlds/:file/state", get(worlds::get_world_state))
         .route("/api/worlds/:file/meta", patch(worlds::update_world_meta))
         .route("/api/worlds/:file/resize", post(worlds::resize_world_handler))
+        .route("/api/worlds/:file/linked-worlds", get(worlds::list_linked_worlds))
         .route(
             "/api/worlds/:file/bgm",
             get(worlds::get_world_bgm)
@@ -71,12 +73,17 @@ pub fn build_router(state: AppState) -> Router {
                 .delete(worlds::delete_world_bgm_handler),
         )
         .route("/api/worlds/:file/export", get(share::export_world))
+        .route("/api/worlds/:file/export-pack", get(share::export_world_pack))
         .route("/api/worlds/:file/export-html", get(share::export_world_html))
         .route("/api/worlds/:file/terrain/batch", post(worlds::batch_update_terrain))
         .route("/api/worlds/:file/entities", post(worlds::create_entities))
         .route(
             "/api/worlds/:file/entities/:id",
             patch(worlds::update_entity).delete(worlds::delete_entity),
+        )
+        .route(
+            "/api/worlds/:file/entities/:id/link-interior",
+            post(worlds::link_interior_portal),
         )
         .route("/api/worlds/:file/paths", post(worlds::create_path))
         .route(

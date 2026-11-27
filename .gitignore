@@ -1,5 +1,6 @@
 /target/
 /worlds/
+/releases/worlds/
 *.stackworld.db
 *.stackworld.db-wal
 *.stackworld.db-shm
